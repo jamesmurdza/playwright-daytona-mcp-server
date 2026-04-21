@@ -22,11 +22,6 @@ pipx install git+https://github.com/jamesmurdza/playwright-daytona-mcp-server.gi
 
 1. Sign up at [daytona.io](https://daytona.io)
 2. Go to your dashboard and generate an API key
-3. Set it as an environment variable:
-
-```bash
-export DAYTONA_API_KEY="your-api-key-here"
-```
 
 ### 3. Configure Claude Code / Claude Desktop
 
