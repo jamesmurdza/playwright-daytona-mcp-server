@@ -2,6 +2,8 @@
 
 An MCP (Model Context Protocol) server that lets you control a full Chromium browser running inside a [Daytona](https://daytona.io) cloud sandbox. Use it with Claude Code, Claude Desktop, or any MCP-compatible client to browse the web, take screenshots, fill forms, and more.
 
+https://github.com/user-attachments/assets/23b13e1f-4ed3-4204-ad0d-b2fdb1f77d0d
+
 ## Features
 
 - **Full Chromium Browser**: Runs a real Chromium instance (not headless) in a virtual display
