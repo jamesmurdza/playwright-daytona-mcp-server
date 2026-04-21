@@ -262,20 +262,22 @@ async def browser_start(
         await asyncio.to_thread(sandbox.fs.upload_file, _LAUNCHER_SCRIPT.encode(), _LAUNCHER_PATH)
         await asyncio.to_thread(sandbox.process.create_session, _SESSION_ID)
 
+        # Start the desktop first — this is what VNC on 6080 streams. Chromium
+        # then launches into the same display (:0) so its window is visible.
+        # Previously chromium rendered to a separate Xvfb on :99, invisible to VNC.
+        await asyncio.to_thread(sandbox.computer_use.start)
+        vnc_preview = await asyncio.to_thread(sandbox.create_signed_preview_url, 6080)
+        _session._vnc_url = vnc_preview.url
+
         from daytona_sdk import SessionExecuteRequest
         cmd = await asyncio.to_thread(
             sandbox.process.execute_session_command,
             _SESSION_ID,
             SessionExecuteRequest(
-                command=f"Xvfb :99 -screen 0 1920x1080x24 & export DISPLAY=:99 && sleep 2 && python {_LAUNCHER_PATH}",
+                command=f"DISPLAY=:0 python {_LAUNCHER_PATH}",
                 run_async=True,
             ),
         )
-
-        # Start VNC for live viewing
-        await asyncio.to_thread(sandbox.computer_use.start)
-        vnc_preview = await asyncio.to_thread(sandbox.create_signed_preview_url, 6080)
-        _session._vnc_url = vnc_preview.url
 
         # Wait for browser and proxy to start
         await asyncio.sleep(15)
