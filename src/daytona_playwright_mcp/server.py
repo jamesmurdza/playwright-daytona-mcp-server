@@ -3,14 +3,16 @@ Daytona Playwright MCP Server
 
 An MCP server that provides tools to control a Playwright browser running inside
 a Daytona sandbox. Supports navigation, clicking, typing, screenshots, and more.
+
+Uses async Playwright API to avoid threading issues with FastMCP's worker pool.
 """
 
+import asyncio
 import base64
 import json
 import os
 import signal
 import sys
-import time
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Annotated, Literal
@@ -27,7 +29,7 @@ except ImportError:
     DAYTONA_AVAILABLE = False
 
 try:
-    from patchright.sync_api import sync_playwright, Browser, Page, BrowserContext
+    from patchright.async_api import async_playwright, Browser, Page, BrowserContext
     PATCHRIGHT_AVAILABLE = True
 except ImportError:
     PATCHRIGHT_AVAILABLE = False
@@ -218,7 +220,7 @@ mcp = FastMCP(
 # ============================================================================
 
 @mcp.tool
-def browser_start(
+async def browser_start(
     timeout: Annotated[int, "Timeout in seconds to wait for browser to be ready"] = 60
 ) -> str:
     """
@@ -246,22 +248,23 @@ def browser_start(
     api_url = os.environ.get("DAYTONA_API_URL", os.environ.get("DAYTONA_SERVER_URL"))
 
     try:
-        # Initialize Daytona client
+        # Initialize Daytona client (blocking SDK calls run in thread pool)
         config = DaytonaConfig(api_key=api_key, api_url=api_url) if api_url else DaytonaConfig(api_key=api_key)
         daytona = Daytona(config)
 
         # Create sandbox using the default Python sandbox (has chromium + Xvfb)
-        sandbox = daytona.create(timeout=timeout)
+        sandbox = await asyncio.to_thread(daytona.create, timeout=timeout)
 
         _session.sandbox = sandbox
 
         # Upload the TCP proxy script and launcher script
-        sandbox.fs.upload_file(_PROXY_SCRIPT.encode(), _PROXY_PATH)
-        sandbox.fs.upload_file(_LAUNCHER_SCRIPT.encode(), _LAUNCHER_PATH)
-        sandbox.process.create_session(_SESSION_ID)
+        await asyncio.to_thread(sandbox.fs.upload_file, _PROXY_SCRIPT.encode(), _PROXY_PATH)
+        await asyncio.to_thread(sandbox.fs.upload_file, _LAUNCHER_SCRIPT.encode(), _LAUNCHER_PATH)
+        await asyncio.to_thread(sandbox.process.create_session, _SESSION_ID)
 
         from daytona_sdk import SessionExecuteRequest
-        cmd = sandbox.process.execute_session_command(
+        cmd = await asyncio.to_thread(
+            sandbox.process.execute_session_command,
             _SESSION_ID,
             SessionExecuteRequest(
                 command=f"Xvfb :99 -screen 0 1920x1080x24 & export DISPLAY=:99 && sleep 2 && python {_LAUNCHER_PATH}",
@@ -270,51 +273,51 @@ def browser_start(
         )
 
         # Start VNC for live viewing
-        sandbox.computer_use.start()
-        vnc_preview = sandbox.create_signed_preview_url(6080)
+        await asyncio.to_thread(sandbox.computer_use.start)
+        vnc_preview = await asyncio.to_thread(sandbox.create_signed_preview_url, 6080)
         _session._vnc_url = vnc_preview.url
 
         # Wait for browser and proxy to start
-        time.sleep(15)
+        await asyncio.sleep(15)
 
         # Get signed preview URL for CDP connection (use PROXY_PORT, not CDP_PORT)
-        signed_preview = sandbox.create_signed_preview_url(PROXY_PORT)
+        signed_preview = await asyncio.to_thread(sandbox.create_signed_preview_url, PROXY_PORT)
         signed = signed_preview.url
         _session._signed_url = signed
 
-        # Connect via CDP
-        pw = sync_playwright().start()
+        # Connect via CDP using async playwright
+        pw = await async_playwright().start()
         _session.playwright = pw
 
-        deadline = time.monotonic() + timeout
+        deadline = asyncio.get_event_loop().time() + timeout
         last_err = None
 
-        while time.monotonic() < deadline:
+        while asyncio.get_event_loop().time() < deadline:
             try:
-                ws_url = _resolve_cdp_ws_url(signed)
-                browser = pw.chromium.connect_over_cdp(ws_url)
+                ws_url = await asyncio.to_thread(_resolve_cdp_ws_url, signed)
+                browser = await pw.chromium.connect_over_cdp(ws_url)
                 _session.browser = browser
 
                 # Get or create a page
                 ctx = browser.contexts[0]
-                page = ctx.pages[0] if ctx.pages else ctx.new_page()
+                page = ctx.pages[0] if ctx.pages else await ctx.new_page()
                 _session.page = page
 
                 return f"Browser started successfully in Daytona sandbox. Ready for commands.\n\nLive view: {_session._vnc_url}"
 
             except Exception as e:
                 last_err = e
-                time.sleep(2)
+                await asyncio.sleep(2)
 
         # Timeout - try to get logs
-        launcher_logs = _tail_launcher_logs(sandbox, cmd)
+        launcher_logs = await asyncio.to_thread(_tail_launcher_logs, sandbox, cmd)
         return f"Error: Browser failed to start within {timeout}s. Last error: {last_err}\nLauncher logs:\n{launcher_logs}"
 
     except Exception as e:
         # Clean up on failure
         if _session.sandbox:
             try:
-                _session.sandbox.delete()
+                await asyncio.to_thread(_session.sandbox.delete)
             except:
                 pass
         _session = BrowserSession()
@@ -322,7 +325,7 @@ def browser_start(
 
 
 @mcp.tool
-def browser_stop() -> str:
+async def browser_stop() -> str:
     """
     Stop the browser and clean up the Daytona sandbox.
 
@@ -334,19 +337,19 @@ def browser_stop() -> str:
 
     if _session.browser:
         try:
-            _session.browser.close()
+            await _session.browser.close()
         except Exception as e:
             errors.append(f"Error closing browser: {e}")
 
     if _session.playwright:
         try:
-            _session.playwright.stop()
+            await _session.playwright.stop()
         except Exception as e:
             errors.append(f"Error stopping playwright: {e}")
 
     if _session.sandbox:
         try:
-            _session.sandbox.delete()
+            await asyncio.to_thread(_session.sandbox.delete)
         except Exception as e:
             errors.append(f"Error deleting sandbox: {e}")
 
@@ -358,7 +361,7 @@ def browser_stop() -> str:
 
 
 @mcp.tool
-def browser_status() -> str:
+async def browser_status() -> str:
     """
     Check the current status of the browser session.
     """
@@ -367,7 +370,7 @@ def browser_status() -> str:
 
     try:
         url = _session.page.url
-        title = _session.page.title()
+        title = await _session.page.title()
         status = f"Browser is running.\nCurrent URL: {url}\nPage title: {title}"
         if _session._vnc_url:
             status += f"\n\nLive view: {_session._vnc_url}"
@@ -381,7 +384,7 @@ def browser_status() -> str:
 # ============================================================================
 
 @mcp.tool
-def browser_navigate(
+async def browser_navigate(
     url: Annotated[str, "The URL to navigate to"],
     wait_until: Annotated[
         Literal["load", "domcontentloaded", "networkidle", "commit"],
@@ -395,46 +398,47 @@ def browser_navigate(
         return "Error: Browser is not running. Call browser_start first."
 
     try:
-        _session.page.goto(url, wait_until=wait_until)
-        return f"Navigated to {url}\nPage title: {_session.page.title()}"
+        await _session.page.goto(url, wait_until=wait_until)
+        title = await _session.page.title()
+        return f"Navigated to {url}\nPage title: {title}"
     except Exception as e:
         return f"Error navigating to {url}: {e}"
 
 
 @mcp.tool
-def browser_back() -> str:
+async def browser_back() -> str:
     """Navigate back in browser history."""
     if not _session.is_connected():
         return "Error: Browser is not running. Call browser_start first."
 
     try:
-        _session.page.go_back()
+        await _session.page.go_back()
         return f"Navigated back. Current URL: {_session.page.url}"
     except Exception as e:
         return f"Error navigating back: {e}"
 
 
 @mcp.tool
-def browser_forward() -> str:
+async def browser_forward() -> str:
     """Navigate forward in browser history."""
     if not _session.is_connected():
         return "Error: Browser is not running. Call browser_start first."
 
     try:
-        _session.page.go_forward()
+        await _session.page.go_forward()
         return f"Navigated forward. Current URL: {_session.page.url}"
     except Exception as e:
         return f"Error navigating forward: {e}"
 
 
 @mcp.tool
-def browser_refresh() -> str:
+async def browser_refresh() -> str:
     """Refresh the current page."""
     if not _session.is_connected():
         return "Error: Browser is not running. Call browser_start first."
 
     try:
-        _session.page.reload()
+        await _session.page.reload()
         return f"Page refreshed. Current URL: {_session.page.url}"
     except Exception as e:
         return f"Error refreshing page: {e}"
@@ -445,7 +449,7 @@ def browser_refresh() -> str:
 # ============================================================================
 
 @mcp.tool
-def browser_click(
+async def browser_click(
     selector: Annotated[str, "CSS selector, XPath, or text to click (e.g., 'button.submit', '//button[@id=\"login\"]', 'text=Sign In')"],
     button: Annotated[Literal["left", "right", "middle"], "Mouse button to use"] = "left",
     click_count: Annotated[int, "Number of clicks (1 for single, 2 for double)"] = 1,
@@ -464,14 +468,14 @@ def browser_click(
         return "Error: Browser is not running. Call browser_start first."
 
     try:
-        _session.page.click(selector, button=button, click_count=click_count, timeout=timeout)
+        await _session.page.click(selector, button=button, click_count=click_count, timeout=timeout)
         return f"Clicked on element: {selector}"
     except Exception as e:
         return f"Error clicking on {selector}: {e}"
 
 
 @mcp.tool
-def browser_type(
+async def browser_type(
     selector: Annotated[str, "CSS selector or text selector for the input element"],
     text: Annotated[str, "Text to type into the element"],
     clear_first: Annotated[bool, "Whether to clear the field before typing"] = True,
@@ -486,16 +490,16 @@ def browser_type(
 
     try:
         if clear_first:
-            _session.page.fill(selector, text, timeout=timeout)
+            await _session.page.fill(selector, text, timeout=timeout)
         else:
-            _session.page.type(selector, text, delay=delay, timeout=timeout)
+            await _session.page.type(selector, text, delay=delay, timeout=timeout)
         return f"Typed text into element: {selector}"
     except Exception as e:
         return f"Error typing into {selector}: {e}"
 
 
 @mcp.tool
-def browser_press(
+async def browser_press(
     key: Annotated[str, "Key to press (e.g., 'Enter', 'Tab', 'Escape', 'ArrowDown', 'Control+a')"],
     selector: Annotated[str | None, "Optional selector to focus before pressing key"] = None,
     timeout: Annotated[int, "Timeout in milliseconds"] = 30000
@@ -511,16 +515,16 @@ def browser_press(
 
     try:
         if selector:
-            _session.page.press(selector, key, timeout=timeout)
+            await _session.page.press(selector, key, timeout=timeout)
         else:
-            _session.page.keyboard.press(key)
+            await _session.page.keyboard.press(key)
         return f"Pressed key: {key}"
     except Exception as e:
         return f"Error pressing key {key}: {e}"
 
 
 @mcp.tool
-def browser_hover(
+async def browser_hover(
     selector: Annotated[str, "CSS selector or text selector for the element to hover over"],
     timeout: Annotated[int, "Timeout in milliseconds"] = 30000
 ) -> str:
@@ -531,14 +535,14 @@ def browser_hover(
         return "Error: Browser is not running. Call browser_start first."
 
     try:
-        _session.page.hover(selector, timeout=timeout)
+        await _session.page.hover(selector, timeout=timeout)
         return f"Hovering over element: {selector}"
     except Exception as e:
         return f"Error hovering over {selector}: {e}"
 
 
 @mcp.tool
-def browser_select(
+async def browser_select(
     selector: Annotated[str, "CSS selector for the <select> element"],
     value: Annotated[str | None, "Value attribute to select"] = None,
     label: Annotated[str | None, "Visible text label to select"] = None,
@@ -555,11 +559,11 @@ def browser_select(
 
     try:
         if value:
-            _session.page.select_option(selector, value=value, timeout=timeout)
+            await _session.page.select_option(selector, value=value, timeout=timeout)
         elif label:
-            _session.page.select_option(selector, label=label, timeout=timeout)
+            await _session.page.select_option(selector, label=label, timeout=timeout)
         elif index is not None:
-            _session.page.select_option(selector, index=index, timeout=timeout)
+            await _session.page.select_option(selector, index=index, timeout=timeout)
         else:
             return "Error: Must provide value, label, or index to select."
         return f"Selected option in: {selector}"
@@ -568,7 +572,7 @@ def browser_select(
 
 
 @mcp.tool
-def browser_scroll(
+async def browser_scroll(
     direction: Annotated[Literal["up", "down", "left", "right"], "Direction to scroll"] = "down",
     amount: Annotated[int, "Amount to scroll in pixels"] = 500,
     selector: Annotated[str | None, "Optional selector for a scrollable element"] = None
@@ -583,22 +587,22 @@ def browser_scroll(
         if selector:
             element = _session.page.locator(selector)
             if direction == "down":
-                element.evaluate(f"el => el.scrollTop += {amount}")
+                await element.evaluate(f"el => el.scrollTop += {amount}")
             elif direction == "up":
-                element.evaluate(f"el => el.scrollTop -= {amount}")
+                await element.evaluate(f"el => el.scrollTop -= {amount}")
             elif direction == "right":
-                element.evaluate(f"el => el.scrollLeft += {amount}")
+                await element.evaluate(f"el => el.scrollLeft += {amount}")
             elif direction == "left":
-                element.evaluate(f"el => el.scrollLeft -= {amount}")
+                await element.evaluate(f"el => el.scrollLeft -= {amount}")
         else:
             if direction == "down":
-                _session.page.evaluate(f"window.scrollBy(0, {amount})")
+                await _session.page.evaluate(f"window.scrollBy(0, {amount})")
             elif direction == "up":
-                _session.page.evaluate(f"window.scrollBy(0, -{amount})")
+                await _session.page.evaluate(f"window.scrollBy(0, -{amount})")
             elif direction == "right":
-                _session.page.evaluate(f"window.scrollBy({amount}, 0)")
+                await _session.page.evaluate(f"window.scrollBy({amount}, 0)")
             elif direction == "left":
-                _session.page.evaluate(f"window.scrollBy(-{amount}, 0)")
+                await _session.page.evaluate(f"window.scrollBy(-{amount}, 0)")
 
         return f"Scrolled {direction} by {amount}px"
     except Exception as e:
@@ -610,7 +614,7 @@ def browser_scroll(
 # ============================================================================
 
 @mcp.tool
-def browser_screenshot(
+async def browser_screenshot(
     full_page: Annotated[bool, "Whether to capture the full scrollable page"] = False,
     selector: Annotated[str | None, "Optional selector to screenshot a specific element"] = None
 ) -> Image:
@@ -624,9 +628,9 @@ def browser_screenshot(
 
     try:
         if selector:
-            screenshot_bytes = _session.page.locator(selector).screenshot()
+            screenshot_bytes = await _session.page.locator(selector).screenshot()
         else:
-            screenshot_bytes = _session.page.screenshot(full_page=full_page)
+            screenshot_bytes = await _session.page.screenshot(full_page=full_page)
 
         return Image(data=screenshot_bytes, format="png")
     except Exception as e:
@@ -634,7 +638,7 @@ def browser_screenshot(
 
 
 @mcp.tool
-def browser_get_text(
+async def browser_get_text(
     selector: Annotated[str | None, "CSS selector to get text from specific element(s). If not provided, gets all visible text."] = None,
     timeout: Annotated[int, "Timeout in milliseconds"] = 30000
 ) -> str:
@@ -647,22 +651,22 @@ def browser_get_text(
     try:
         if selector:
             elements = _session.page.locator(selector)
-            count = elements.count()
+            count = await elements.count()
             if count == 0:
                 return f"No elements found matching: {selector}"
 
             texts = []
             for i in range(min(count, 100)):  # Limit to first 100 elements
-                texts.append(elements.nth(i).inner_text(timeout=timeout))
+                texts.append(await elements.nth(i).inner_text(timeout=timeout))
             return "\n---\n".join(texts)
         else:
-            return _session.page.inner_text("body", timeout=timeout)
+            return await _session.page.inner_text("body", timeout=timeout)
     except Exception as e:
         return f"Error getting text: {e}"
 
 
 @mcp.tool
-def browser_get_html(
+async def browser_get_html(
     selector: Annotated[str | None, "CSS selector to get HTML from specific element. If not provided, gets full page HTML."] = None,
     outer: Annotated[bool, "Whether to include the element itself (outer) or just its contents (inner)"] = False
 ) -> str:
@@ -676,17 +680,17 @@ def browser_get_html(
         if selector:
             element = _session.page.locator(selector).first
             if outer:
-                return element.evaluate("el => el.outerHTML")
+                return await element.evaluate("el => el.outerHTML")
             else:
-                return element.inner_html()
+                return await element.inner_html()
         else:
-            return _session.page.content()
+            return await _session.page.content()
     except Exception as e:
         return f"Error getting HTML: {e}"
 
 
 @mcp.tool
-def browser_get_attribute(
+async def browser_get_attribute(
     selector: Annotated[str, "CSS selector for the element"],
     attribute: Annotated[str, "Name of the attribute to get (e.g., 'href', 'src', 'class')"],
     timeout: Annotated[int, "Timeout in milliseconds"] = 30000
@@ -698,7 +702,7 @@ def browser_get_attribute(
         return "Error: Browser is not running. Call browser_start first."
 
     try:
-        value = _session.page.get_attribute(selector, attribute, timeout=timeout)
+        value = await _session.page.get_attribute(selector, attribute, timeout=timeout)
         if value is None:
             return f"Attribute '{attribute}' not found on element: {selector}"
         return value
@@ -707,7 +711,7 @@ def browser_get_attribute(
 
 
 @mcp.tool
-def browser_evaluate(
+async def browser_evaluate(
     script: Annotated[str, "JavaScript code to execute in the page context"],
 ) -> str:
     """
@@ -723,7 +727,7 @@ def browser_evaluate(
         return "Error: Browser is not running. Call browser_start first."
 
     try:
-        result = _session.page.evaluate(script)
+        result = await _session.page.evaluate(script)
         if result is None:
             return "null"
         if isinstance(result, (dict, list)):
@@ -738,7 +742,7 @@ def browser_evaluate(
 # ============================================================================
 
 @mcp.tool
-def browser_wait_for_selector(
+async def browser_wait_for_selector(
     selector: Annotated[str, "CSS selector to wait for"],
     state: Annotated[
         Literal["attached", "detached", "visible", "hidden"],
@@ -759,14 +763,14 @@ def browser_wait_for_selector(
         return "Error: Browser is not running. Call browser_start first."
 
     try:
-        _session.page.wait_for_selector(selector, state=state, timeout=timeout)
+        await _session.page.wait_for_selector(selector, state=state, timeout=timeout)
         return f"Element {selector} is now {state}"
     except Exception as e:
         return f"Error waiting for selector {selector}: {e}"
 
 
 @mcp.tool
-def browser_wait_for_navigation(
+async def browser_wait_for_navigation(
     url: Annotated[str | None, "URL pattern to wait for (glob, regex, or exact)"] = None,
     timeout: Annotated[int, "Timeout in milliseconds"] = 30000
 ) -> str:
@@ -778,9 +782,9 @@ def browser_wait_for_navigation(
 
     try:
         if url:
-            _session.page.wait_for_url(url, timeout=timeout)
+            await _session.page.wait_for_url(url, timeout=timeout)
         else:
-            _session.page.wait_for_load_state("load", timeout=timeout)
+            await _session.page.wait_for_load_state("load", timeout=timeout)
         return f"Navigation complete. Current URL: {_session.page.url}"
     except Exception as e:
         return f"Error waiting for navigation: {e}"
@@ -791,7 +795,7 @@ def browser_wait_for_navigation(
 # ============================================================================
 
 @mcp.tool
-def browser_new_tab(
+async def browser_new_tab(
     url: Annotated[str | None, "URL to open in the new tab"] = None
 ) -> str:
     """
@@ -802,11 +806,11 @@ def browser_new_tab(
 
     try:
         ctx = _session.browser.contexts[0]
-        page = ctx.new_page()
+        page = await ctx.new_page()
         _session.page = page
 
         if url:
-            page.goto(url)
+            await page.goto(url)
             return f"Opened new tab and navigated to: {url}"
         return "Opened new blank tab"
     except Exception as e:
@@ -814,7 +818,7 @@ def browser_new_tab(
 
 
 @mcp.tool
-def browser_list_tabs() -> str:
+async def browser_list_tabs() -> str:
     """
     List all open tabs with their URLs and titles.
     """
@@ -826,14 +830,15 @@ def browser_list_tabs() -> str:
         tabs = []
         for i, page in enumerate(ctx.pages):
             active = " (active)" if page == _session.page else ""
-            tabs.append(f"{i}: {page.title()} - {page.url}{active}")
+            title = await page.title()
+            tabs.append(f"{i}: {title} - {page.url}{active}")
         return "\n".join(tabs) if tabs else "No tabs open"
     except Exception as e:
         return f"Error listing tabs: {e}"
 
 
 @mcp.tool
-def browser_switch_tab(
+async def browser_switch_tab(
     index: Annotated[int, "Index of the tab to switch to (0-based)"]
 ) -> str:
     """
@@ -849,14 +854,15 @@ def browser_switch_tab(
             return f"Error: Tab index {index} out of range. Available tabs: 0-{len(pages)-1}"
 
         _session.page = pages[index]
-        _session.page.bring_to_front()
-        return f"Switched to tab {index}: {_session.page.title()} - {_session.page.url}"
+        await _session.page.bring_to_front()
+        title = await _session.page.title()
+        return f"Switched to tab {index}: {title} - {_session.page.url}"
     except Exception as e:
         return f"Error switching tab: {e}"
 
 
 @mcp.tool
-def browser_close_tab(
+async def browser_close_tab(
     index: Annotated[int | None, "Index of the tab to close (defaults to current tab)"] = None
 ) -> str:
     """
@@ -875,7 +881,7 @@ def browser_close_tab(
         if index is None:
             # Close current tab
             current_idx = pages.index(_session.page)
-            _session.page.close()
+            await _session.page.close()
             # Switch to another tab
             remaining = ctx.pages
             _session.page = remaining[min(current_idx, len(remaining)-1)]
@@ -883,8 +889,9 @@ def browser_close_tab(
         else:
             if index < 0 or index >= len(pages):
                 return f"Error: Tab index {index} out of range"
-            pages[index].close()
-            if pages[index] == _session.page:
+            page_to_close = pages[index]
+            await page_to_close.close()
+            if page_to_close == _session.page:
                 _session.page = ctx.pages[0]
             return f"Closed tab {index}"
     except Exception as e:
@@ -896,7 +903,7 @@ def browser_close_tab(
 # ============================================================================
 
 @mcp.tool
-def browser_upload_file(
+async def browser_upload_file(
     selector: Annotated[str, "CSS selector for the file input element"],
     file_path: Annotated[str, "Path to the file to upload (on your local machine)"],
     timeout: Annotated[int, "Timeout in milliseconds"] = 30000
@@ -910,14 +917,14 @@ def browser_upload_file(
         return "Error: Browser is not running. Call browser_start first."
 
     try:
-        _session.page.set_input_files(selector, file_path, timeout=timeout)
+        await _session.page.set_input_files(selector, file_path, timeout=timeout)
         return f"Uploaded file: {file_path}"
     except Exception as e:
         return f"Error uploading file: {e}"
 
 
 @mcp.tool
-def browser_download_wait(
+async def browser_download_wait(
     timeout: Annotated[int, "Timeout in milliseconds to wait for download"] = 60000
 ) -> str:
     """
