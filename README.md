@@ -225,9 +225,10 @@ uv run pytest
 ## How It Works
 
 1. When you call `browser_start`, the server:
-   - Creates a Daytona sandbox with the `daytonaio/ai-browser:latest` image (Chrome + Xvfb pre-installed)
-   - Launches Chrome with remote debugging enabled
-   - Connects to Chrome via CDP (Chrome DevTools Protocol) through Daytona's secure proxy
+   - Creates a Daytona sandbox (default Python sandbox has Chromium + Xvfb pre-installed)
+   - Launches Chromium with remote debugging enabled
+   - Starts a TCP proxy to expose the CDP port externally
+   - Connects to Chromium via CDP (Chrome DevTools Protocol) through Daytona's secure signed URLs
 
 2. All browser commands are executed through the Playwright API connected to the remote browser
 

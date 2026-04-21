@@ -21,8 +21,7 @@ from fastmcp.utilities.types import Image
 
 # Conditionally import Daytona SDK - allows running without it for testing
 try:
-    from daytona_sdk import Daytona, DaytonaConfig, CreateSandboxParams
-    from daytona_sdk.api_client import ApiException
+    from daytona_sdk import Daytona, DaytonaConfig
     DAYTONA_AVAILABLE = True
 except ImportError:
     DAYTONA_AVAILABLE = False
@@ -35,35 +34,115 @@ except ImportError:
 
 
 # ============================================================================
-# Daytona Browser Image Definition
+# Daytona Browser Configuration
 # ============================================================================
 
-# Python code that runs INSIDE the Daytona sandbox to launch Chrome
+# The default Daytona sandbox has chromium and Xvfb installed.
+# Chromium binds to 127.0.0.1 only, so we use a TCP proxy to expose it on 0.0.0.0.
 CDP_PORT = 9222
-
-_LAUNCHER_SCRIPT = f'''
-import signal
-from patchright.sync_api import sync_playwright
-
-p = sync_playwright().start()
-p.chromium.launch_persistent_context(
-    user_data_dir="/home/daytona/.browser-profile",
-    channel="chrome",
-    headless=False,
-    no_viewport=True,
-    ignore_default_args=["--remote-debugging-pipe"],
-    args=[
-        "--remote-debugging-port={CDP_PORT}",
-        "--remote-debugging-address=0.0.0.0",
-        "--no-first-run",
-        "--no-default-browser-check",
-    ],
-)
-signal.pause()
-'''
+PROXY_PORT = 9223  # Exposed port for external access
 
 _LAUNCHER_PATH = "/tmp/_enable_browser_launcher.py"
+_PROXY_PATH = "/tmp/_tcp_proxy.py"
 _SESSION_ID = "enable-browser"
+
+# TCP proxy script (forwards 0.0.0.0:9223 -> 127.0.0.1:9222)
+_PROXY_SCRIPT = f'''
+import socket
+import threading
+import sys
+
+LOCAL_PORT = {CDP_PORT}
+PROXY_PORT = {PROXY_PORT}
+
+def forward(source, destination):
+    try:
+        while True:
+            data = source.recv(4096)
+            if not data:
+                break
+            destination.sendall(data)
+    except:
+        pass
+    finally:
+        source.close()
+        destination.close()
+
+def handle_client(client_socket):
+    try:
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.connect(("127.0.0.1", LOCAL_PORT))
+        t1 = threading.Thread(target=forward, args=(client_socket, server))
+        t2 = threading.Thread(target=forward, args=(server, client_socket))
+        t1.daemon = True
+        t2.daemon = True
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+    except Exception as e:
+        print(f"Proxy error: {{e}}", file=sys.stderr)
+        client_socket.close()
+
+def main():
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("0.0.0.0", PROXY_PORT))
+    server.listen(5)
+    print(f"TCP proxy listening on 0.0.0.0:{{PROXY_PORT}}", file=sys.stderr)
+    while True:
+        client, addr = server.accept()
+        t = threading.Thread(target=handle_client, args=(client,))
+        t.daemon = True
+        t.start()
+
+if __name__ == "__main__":
+    main()
+'''
+
+# Launcher script that starts chromium and the TCP proxy
+_LAUNCHER_SCRIPT = f'''
+import signal
+import subprocess
+import os
+import sys
+import time
+
+os.makedirs("/home/daytona/.browser-profile", exist_ok=True)
+
+chromium_args = [
+    "chromium",
+    "--user-data-dir=/home/daytona/.browser-profile",
+    "--remote-debugging-port={CDP_PORT}",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--disable-background-networking",
+    "--disable-client-side-phishing-detection",
+    "--disable-default-apps",
+    "--disable-extensions",
+    "--disable-hang-monitor",
+    "--disable-popup-blocking",
+    "--disable-prompt-on-repost",
+    "--disable-sync",
+    "--disable-translate",
+    "--metrics-recording-only",
+    "--no-sandbox",
+    "--safebrowsing-disable-auto-update",
+    "--disable-dev-shm-usage",
+]
+
+print("Starting chromium...", file=sys.stderr)
+chromium_proc = subprocess.Popen(chromium_args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+print(f"Chromium PID: {{chromium_proc.pid}}", file=sys.stderr)
+
+time.sleep(5)
+
+print("Starting TCP proxy...", file=sys.stderr)
+proxy_proc = subprocess.Popen(["python", "{_PROXY_PATH}"], stdout=subprocess.DEVNULL, stderr=sys.stderr)
+print(f"Proxy PID: {{proxy_proc.pid}}", file=sys.stderr)
+
+signal.pause()
+'''
 
 
 # ============================================================================
@@ -163,22 +242,20 @@ def browser_start(
     if not api_key:
         return "Error: DAYTONA_API_KEY environment variable is not set."
 
-    server_url = os.environ.get("DAYTONA_SERVER_URL", "https://app.daytona.io/api")
+    api_url = os.environ.get("DAYTONA_API_URL", os.environ.get("DAYTONA_SERVER_URL"))
 
     try:
         # Initialize Daytona client
-        config = DaytonaConfig(api_key=api_key, server_url=server_url)
+        config = DaytonaConfig(api_key=api_key, api_url=api_url) if api_url else DaytonaConfig(api_key=api_key)
         daytona = Daytona(config)
 
-        # Create sandbox with browser image
-        sandbox = daytona.create(CreateSandboxParams(
-            language="python",
-            image="daytonaio/ai-browser:latest",
-        ), timeout=timeout)
+        # Create sandbox using the default Python sandbox (has chromium + Xvfb)
+        sandbox = daytona.create(timeout=timeout)
 
         _session.sandbox = sandbox
 
-        # Upload and execute the launcher script
+        # Upload the TCP proxy script and launcher script
+        sandbox.fs.upload_file(_PROXY_SCRIPT.encode(), _PROXY_PATH)
         sandbox.fs.upload_file(_LAUNCHER_SCRIPT.encode(), _LAUNCHER_PATH)
         sandbox.process.create_session(_SESSION_ID)
 
@@ -186,13 +263,17 @@ def browser_start(
         cmd = sandbox.process.execute_session_command(
             _SESSION_ID,
             SessionExecuteRequest(
-                command=f"xvfb-run -a python {_LAUNCHER_PATH}",
+                command=f"Xvfb :99 -screen 0 1920x1080x24 & export DISPLAY=:99 && sleep 2 && python {_LAUNCHER_PATH}",
                 run_async=True,
             ),
         )
 
-        # Get signed preview URL for CDP connection
-        signed = sandbox.get_preview_link(CDP_PORT)
+        # Wait for browser and proxy to start
+        time.sleep(15)
+
+        # Get signed preview URL for CDP connection (use PROXY_PORT, not CDP_PORT)
+        signed_preview = sandbox.create_signed_preview_url(PROXY_PORT)
+        signed = signed_preview.url
         _session._signed_url = signed
 
         # Connect via CDP
