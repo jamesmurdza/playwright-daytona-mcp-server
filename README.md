@@ -1,6 +1,6 @@
 # Daytona Playwright MCP Server
 
-An MCP (Model Context Protocol) server that lets you control a full Chrome browser running inside a [Daytona](https://daytona.io) cloud sandbox. Use it with Claude Code, Claude Desktop, or any MCP-compatible client to browse the web, take screenshots, fill forms, and more.
+An MCP (Model Context Protocol) server that lets you control a full Chromium browser running inside a [Daytona](https://daytona.io) cloud sandbox. Use it with Claude Code, Claude Desktop, or any MCP-compatible client to browse the web, take screenshots, fill forms, and more.
 
 ## Features
 
@@ -61,7 +61,7 @@ Or if running from source with uv:
   "mcpServers": {
     "daytona-playwright": {
       "command": "uv",
-      "args": ["run", "--directory", "/path/to/daytona-playwright-mcp", "daytona-playwright-mcp"],
+      "args": ["run", "--directory", "/path/to/playwright-daytona-mcp-server", "daytona-playwright-mcp"],
       "env": {
         "DAYTONA_API_KEY": "your-api-key-here"
       }
@@ -245,7 +245,7 @@ Make sure your API key is configured in the MCP server settings, not just in you
 ### Browser fails to start
 
 - Check that your Daytona API key is valid
-- The browser image may take 1-2 minutes to provision on first use
+- The sandbox may take a minute to provision on first use
 - Increase the `timeout` parameter if needed
 
 ### Screenshots not appearing
