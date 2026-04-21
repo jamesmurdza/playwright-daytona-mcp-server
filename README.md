@@ -4,7 +4,7 @@ An MCP (Model Context Protocol) server that lets you control a full Chrome brows
 
 ## Features
 
-- **Full Chrome Browser**: Runs a real Chrome instance (not headless) using [Patchright](https://github.com/AnyBrowser/patchright) for stealth
+- **Full Chromium Browser**: Runs a real Chromium instance (not headless) in a virtual display
 - **Cloud Sandbox**: Browser runs securely in a Daytona sandbox, isolated from your local machine
 - **Rich Tool Set**: Navigate, click, type, scroll, take screenshots, extract content, manage tabs
 - **Screenshot Support**: Returns screenshots as images that Claude can see and analyze
@@ -109,7 +109,7 @@ Once configured, you can ask Claude to browse the web:
 
 ### Workflow
 
-1. **Start the browser**: Claude will call `browser_start` to create a Daytona sandbox with Chrome
+1. **Start the browser**: Claude will call `browser_start` to create a Daytona sandbox with Chromium
 2. **Navigate and interact**: Use navigation, clicking, typing, and other tools
 3. **Take screenshots**: See what's on the page with `browser_screenshot`
 4. **Clean up**: Call `browser_stop` when done to delete the sandbox
@@ -198,7 +198,7 @@ daytona-playwright-mcp --transport sse --host 0.0.0.0 --port 8765
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `DAYTONA_API_KEY` | Your Daytona API key (required) | - |
-| `DAYTONA_SERVER_URL` | Daytona API server URL | `https://app.daytona.io/api` |
+| `DAYTONA_API_URL` | Daytona API server URL | `https://app.daytona.io/api` |
 
 ## Development
 
@@ -268,6 +268,6 @@ MIT
 ## Credits
 
 - Based on the [Daytona browser-in-sandbox pattern](https://gist.github.com/synacktraa/29e05d51363b40d55e4d163aea8feaae) by synacktraa
-- Uses [Patchright](https://github.com/AnyBrowser/patchright) for stealth browser automation
+- Uses [Patchright](https://github.com/AnyBrowser/patchright) for Playwright CDP connectivity
 - Built with [FastMCP](https://github.com/jlowin/fastmcp) for the MCP server
 - Powered by [Daytona](https://daytona.io) cloud sandboxes
