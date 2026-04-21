@@ -16,14 +16,14 @@ An MCP (Model Context Protocol) server that lets you control a full Chrome brows
 
 ```bash
 # Using uv (recommended)
-uv pip install git+https://github.com/YOUR_USERNAME/daytona-playwright-mcp.git
+uv pip install git+https://github.com/jamesmurdza/playwright-daytona-mcp-server.git
 
 # Or with pip
-pip install git+https://github.com/YOUR_USERNAME/daytona-playwright-mcp.git
+pip install git+https://github.com/jamesmurdza/playwright-daytona-mcp-server.git
 
 # Or install from source
-git clone https://github.com/YOUR_USERNAME/daytona-playwright-mcp.git
-cd daytona-playwright-mcp
+git clone https://github.com/jamesmurdza/playwright-daytona-mcp-server.git
+cd playwright-daytona-mcp-server
 uv pip install -e .
 ```
 
@@ -206,8 +206,8 @@ daytona-playwright-mcp --transport sse --host 0.0.0.0 --port 8765
 
 ```bash
 # Clone the repository
-git clone https://github.com/YOUR_USERNAME/daytona-playwright-mcp.git
-cd daytona-playwright-mcp
+git clone https://github.com/jamesmurdza/playwright-daytona-mcp-server.git
+cd playwright-daytona-mcp-server
 
 # Install dependencies
 uv sync
