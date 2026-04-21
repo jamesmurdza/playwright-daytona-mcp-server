@@ -228,7 +228,7 @@ The default timeout is 60 seconds. For slower connections or first-time image bu
 
 ## License
 
-MIT
+MIT - James Murdza, Harsh Verma
 
 ## Credits
 
