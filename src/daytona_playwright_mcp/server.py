@@ -157,6 +157,7 @@ class BrowserSession:
     page: object = None
     playwright: object = None
     _signed_url: str = ""
+    _vnc_url: str = ""
 
     def is_connected(self) -> bool:
         """Check if browser is connected and usable."""
@@ -268,6 +269,11 @@ def browser_start(
             ),
         )
 
+        # Start VNC for live viewing
+        sandbox.computer_use.start()
+        vnc_preview = sandbox.create_signed_preview_url(6080)
+        _session._vnc_url = vnc_preview.url
+
         # Wait for browser and proxy to start
         time.sleep(15)
 
@@ -294,7 +300,7 @@ def browser_start(
                 page = ctx.pages[0] if ctx.pages else ctx.new_page()
                 _session.page = page
 
-                return f"Browser started successfully in Daytona sandbox. Ready for commands."
+                return f"Browser started successfully in Daytona sandbox. Ready for commands.\n\nLive view: {_session._vnc_url}"
 
             except Exception as e:
                 last_err = e
@@ -362,7 +368,10 @@ def browser_status() -> str:
     try:
         url = _session.page.url
         title = _session.page.title()
-        return f"Browser is running.\nCurrent URL: {url}\nPage title: {title}"
+        status = f"Browser is running.\nCurrent URL: {url}\nPage title: {title}"
+        if _session._vnc_url:
+            status += f"\n\nLive view: {_session._vnc_url}"
+        return status
     except Exception as e:
         return f"Browser session exists but may be disconnected: {e}"
 
