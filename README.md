@@ -15,16 +15,7 @@ An MCP (Model Context Protocol) server that lets you control a full Chromium bro
 ### 1. Install the Package
 
 ```bash
-# Using uv (recommended)
-uv pip install git+https://github.com/jamesmurdza/playwright-daytona-mcp-server.git
-
-# Or with pip
-pip install git+https://github.com/jamesmurdza/playwright-daytona-mcp-server.git
-
-# Or install from source
-git clone https://github.com/jamesmurdza/playwright-daytona-mcp-server.git
-cd playwright-daytona-mcp-server
-uv pip install -e .
+pipx install git+https://github.com/jamesmurdza/playwright-daytona-mcp-server.git
 ```
 
 ### 2. Get a Daytona API Key
@@ -37,46 +28,9 @@ uv pip install -e .
 export DAYTONA_API_KEY="your-api-key-here"
 ```
 
-### 3. Configure Claude Code
+### 3. Configure Claude Code / Claude Desktop
 
-Add to your Claude Code MCP settings (`~/.claude/claude_desktop_config.json` or via Claude Code settings):
-
-```json
-{
-  "mcpServers": {
-    "daytona-playwright": {
-      "command": "daytona-playwright-mcp",
-      "env": {
-        "DAYTONA_API_KEY": "your-api-key-here"
-      }
-    }
-  }
-}
-```
-
-Or if running from source with uv:
-
-```json
-{
-  "mcpServers": {
-    "daytona-playwright": {
-      "command": "uv",
-      "args": ["run", "--directory", "/path/to/playwright-daytona-mcp-server", "daytona-playwright-mcp"],
-      "env": {
-        "DAYTONA_API_KEY": "your-api-key-here"
-      }
-    }
-  }
-}
-```
-
-### 4. Configure Claude Desktop
-
-For Claude Desktop, add to your configuration file:
-
-**macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
-**Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
-**Linux**: `~/.config/Claude/claude_desktop_config.json`
+Add to your MCP settings:
 
 ```json
 {
@@ -175,8 +129,6 @@ Once configured, you can ask Claude to browse the web:
 
 ```bash
 daytona-playwright-mcp
-# or
-uv run daytona-playwright-mcp
 ```
 
 ### HTTP Transport (for remote connections)
