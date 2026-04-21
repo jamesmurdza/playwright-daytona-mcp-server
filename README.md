@@ -168,6 +168,24 @@ uv sync
 uv run daytona-playwright-mcp
 ```
 
+### Configure MCP for Development
+
+When developing locally, use this MCP configuration:
+
+```json
+{
+  "mcpServers": {
+    "daytona-playwright": {
+      "command": "uv",
+      "args": ["run", "--directory", "/path/to/playwright-daytona-mcp-server", "daytona-playwright-mcp"],
+      "env": {
+        "DAYTONA_API_KEY": "your-api-key-here"
+      }
+    }
+  }
+}
+```
+
 ### Run Tests
 
 ```bash
