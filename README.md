@@ -120,6 +120,15 @@ Once configured, you can ask Claude to browse the web:
 |------|-------------|
 | `browser_upload_file` | Upload a file to a file input |
 
+### Cookie Management
+| Tool | Description |
+|------|-------------|
+| `browser_get_cookies` | Get all cookies or cookies for specific URLs |
+| `browser_set_cookie` | Set a single cookie with full options |
+| `browser_set_cookies` | Set multiple cookies from JSON |
+| `browser_delete_cookie` | Delete a specific cookie by name |
+| `browser_clear_cookies` | Clear all cookies from the browser |
+
 ## Running with Different Transports
 
 ### Stdio (Default - for Claude Code/Desktop)

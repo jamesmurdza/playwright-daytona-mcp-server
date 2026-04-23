@@ -875,6 +875,187 @@ async def browser_download_wait(
 
 
 # ============================================================================
+# Cookie Management Tools
+# ============================================================================
+
+@mcp.tool
+async def browser_get_cookies(
+    urls: Annotated[str | None, "Optional comma-separated URLs to filter cookies for"] = None
+) -> str:
+    """
+    Get all cookies from the browser context.
+
+    If URLs are provided, only returns cookies that would be sent to those URLs.
+    Returns cookies as a JSON array with properties: name, value, domain, path,
+    expires, httpOnly, secure, sameSite.
+    """
+    if not _session.is_connected():
+        return "Error: Browser is not running. Call browser_start first."
+
+    try:
+        ctx = _session.browser.contexts[0]
+        if urls:
+            url_list = [u.strip() for u in urls.split(",")]
+            cookies = await ctx.cookies(url_list)
+        else:
+            cookies = await ctx.cookies()
+
+        if not cookies:
+            return "No cookies found."
+
+        return json.dumps(cookies, indent=2)
+    except Exception as e:
+        return f"Error getting cookies: {e}"
+
+
+@mcp.tool
+async def browser_set_cookie(
+    name: Annotated[str, "Cookie name"],
+    value: Annotated[str, "Cookie value"],
+    domain: Annotated[str | None, "Cookie domain (e.g., '.example.com'). Required if url is not provided."] = None,
+    url: Annotated[str | None, "URL to associate the cookie with. Required if domain is not provided."] = None,
+    path: Annotated[str, "Cookie path"] = "/",
+    expires: Annotated[float | None, "Unix timestamp when the cookie expires. -1 for session cookie."] = None,
+    http_only: Annotated[bool, "Whether the cookie is HTTP-only"] = False,
+    secure: Annotated[bool, "Whether the cookie requires HTTPS"] = False,
+    same_site: Annotated[Literal["Strict", "Lax", "None"], "SameSite attribute"] = "Lax"
+) -> str:
+    """
+    Set a single cookie in the browser context.
+
+    Either 'url' or 'domain' must be provided. If url is provided, domain and path
+    are inferred from it.
+    """
+    if not _session.is_connected():
+        return "Error: Browser is not running. Call browser_start first."
+
+    if not url and not domain:
+        return "Error: Either 'url' or 'domain' must be provided."
+
+    try:
+        ctx = _session.browser.contexts[0]
+
+        cookie = {
+            "name": name,
+            "value": value,
+            "path": path,
+            "httpOnly": http_only,
+            "secure": secure,
+            "sameSite": same_site,
+        }
+
+        if url:
+            cookie["url"] = url
+        if domain:
+            cookie["domain"] = domain
+        if expires is not None:
+            cookie["expires"] = expires
+
+        await ctx.add_cookies([cookie])
+        return f"Cookie '{name}' set successfully."
+    except Exception as e:
+        return f"Error setting cookie: {e}"
+
+
+@mcp.tool
+async def browser_set_cookies(
+    cookies_json: Annotated[str, "JSON array of cookie objects. Each object should have: name, value, and either url or domain. Optional: path, expires, httpOnly, secure, sameSite"]
+) -> str:
+    """
+    Set multiple cookies in the browser context.
+
+    Example input:
+    [
+      {"name": "session", "value": "abc123", "url": "https://example.com"},
+      {"name": "prefs", "value": "dark", "domain": ".example.com", "path": "/"}
+    ]
+    """
+    if not _session.is_connected():
+        return "Error: Browser is not running. Call browser_start first."
+
+    try:
+        cookies = json.loads(cookies_json)
+        if not isinstance(cookies, list):
+            return "Error: cookies_json must be a JSON array of cookie objects."
+
+        ctx = _session.browser.contexts[0]
+        await ctx.add_cookies(cookies)
+        return f"Successfully set {len(cookies)} cookie(s)."
+    except json.JSONDecodeError as e:
+        return f"Error parsing JSON: {e}"
+    except Exception as e:
+        return f"Error setting cookies: {e}"
+
+
+@mcp.tool
+async def browser_delete_cookie(
+    name: Annotated[str, "Name of the cookie to delete"],
+    domain: Annotated[str | None, "Domain of the cookie (optional, for specificity)"] = None,
+    path: Annotated[str | None, "Path of the cookie (optional, for specificity)"] = None
+) -> str:
+    """
+    Delete a specific cookie by name.
+
+    If domain and/or path are provided, only deletes cookies matching those criteria.
+    """
+    if not _session.is_connected():
+        return "Error: Browser is not running. Call browser_start first."
+
+    try:
+        ctx = _session.browser.contexts[0]
+
+        # Get all cookies first
+        all_cookies = await ctx.cookies()
+
+        # Find matching cookies
+        matching = [c for c in all_cookies if c["name"] == name]
+        if domain:
+            matching = [c for c in matching if c.get("domain") == domain]
+        if path:
+            matching = [c for c in matching if c.get("path") == path]
+
+        if not matching:
+            return f"No cookie found with name '{name}'" + (f" and domain '{domain}'" if domain else "") + (f" and path '{path}'" if path else "")
+
+        # Clear all cookies and re-add the ones we want to keep
+        cookies_to_keep = [c for c in all_cookies if c not in matching]
+        await ctx.clear_cookies()
+
+        if cookies_to_keep:
+            await ctx.add_cookies(cookies_to_keep)
+
+        return f"Deleted {len(matching)} cookie(s) with name '{name}'."
+    except Exception as e:
+        return f"Error deleting cookie: {e}"
+
+
+@mcp.tool
+async def browser_clear_cookies() -> str:
+    """
+    Clear all cookies from the browser context.
+
+    This removes all cookies for all domains.
+    """
+    if not _session.is_connected():
+        return "Error: Browser is not running. Call browser_start first."
+
+    try:
+        ctx = _session.browser.contexts[0]
+
+        # Get count before clearing for feedback
+        cookies = await ctx.cookies()
+        count = len(cookies)
+
+        await ctx.clear_cookies()
+
+        if count == 0:
+            return "No cookies to clear."
+        return f"Cleared {count} cookie(s)."
+    except Exception as e:
+        return f"Error clearing cookies: {e}"
+
+
+# ============================================================================
 # Entry Point
 # ============================================================================
 
