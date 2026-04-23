@@ -5,7 +5,7 @@ description = "MCP server for controlling Playwright browser in Daytona sandbox"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "daytona-sdk>=0.12.1",
+    "daytona>=0.134.0",
     "fastmcp>=2.0.0",
     "patchright>=1.48",
 ]

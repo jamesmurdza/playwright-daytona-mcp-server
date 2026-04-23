@@ -1,132 +1,24 @@
 """
 Daytona Playwright MCP Server
 
-An MCP server that provides tools to control a Playwright browser running inside
-a Daytona sandbox. Supports navigation, clicking, typing, screenshots, and more.
+An MCP server that controls a stealth patchright+Chrome browser running inside
+a Daytona sandbox, with a live VNC view exposed via computer_use.
 
-Uses async Playwright API to avoid threading issues with FastMCP's worker pool.
+Uses the async Playwright API to avoid threading issues with FastMCP's worker pool.
 """
 
-import asyncio
 import json
-import os
 import sys
-import urllib.request
-from dataclasses import dataclass
 from typing import Annotated, Literal
-from urllib.parse import urlparse
 
 from fastmcp import FastMCP
 from fastmcp.utilities.types import Image
 
-# Conditionally import Daytona SDK - allows running without it for testing
-try:
-    from daytona_sdk import Daytona, DaytonaConfig
-    DAYTONA_AVAILABLE = True
-except ImportError:
-    DAYTONA_AVAILABLE = False
-
-try:
-    from patchright.async_api import async_playwright, Browser, Page, BrowserContext
-    PATCHRIGHT_AVAILABLE = True
-except ImportError:
-    PATCHRIGHT_AVAILABLE = False
+from .browser import BrowserSession, create_browser_session
 
 
-# ============================================================================
-# Daytona Browser Configuration
-# ============================================================================
-
-# The default Daytona sandbox has chromium and Xvfb installed.
-CDP_PORT = 9222
-
-_LAUNCHER_PATH = "/tmp/_enable_browser_launcher.py"
-_SESSION_ID = "enable-browser"
-
-# Launcher script that starts chromium with CDP.
-_LAUNCHER_SCRIPT = f'''
-import signal
-import subprocess
-import os
-import sys
-
-os.makedirs("/home/daytona/.browser-profile", exist_ok=True)
-
-chromium_args = [
-    "chromium",
-    "--user-data-dir=/home/daytona/.browser-profile",
-    "--remote-debugging-port={CDP_PORT}",
-    "--remote-debugging-address=0.0.0.0",
-    "--no-first-run",
-    "--no-default-browser-check",
-    "--disable-background-networking",
-    "--disable-client-side-phishing-detection",
-    "--disable-default-apps",
-    "--disable-extensions",
-    "--disable-hang-monitor",
-    "--disable-popup-blocking",
-    "--disable-prompt-on-repost",
-    "--disable-sync",
-    "--disable-translate",
-    "--metrics-recording-only",
-    "--no-sandbox",
-    "--safebrowsing-disable-auto-update",
-    "--disable-dev-shm-usage",
-]
-
-print("Starting chromium...", file=sys.stderr)
-chromium_proc = subprocess.Popen(chromium_args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-print(f"Chromium PID: {{chromium_proc.pid}}", file=sys.stderr)
-
-signal.pause()
-'''
-
-
-# ============================================================================
-# Browser Session Manager
-# ============================================================================
-
-@dataclass
-class BrowserSession:
-    """Manages a browser session inside a Daytona sandbox."""
-    sandbox: object = None
-    browser: object = None
-    page: object = None
-    playwright: object = None
-    _signed_url: str = ""
-    _vnc_url: str = ""
-
-    def is_connected(self) -> bool:
-        """Check if browser is connected and usable."""
-        return self.browser is not None and self.page is not None
-
-
-# Global session state
-_session: BrowserSession = BrowserSession()
-
-
-def _resolve_cdp_ws_url(preview_url: str) -> str:
-    """
-    Fetch /json/version and rebuild the WS URL against the Daytona proxy.
-    """
-    probe = preview_url.rstrip("/") + "/json/version"
-    with urllib.request.urlopen(probe, timeout=10) as r:
-        data = json.load(r)
-        path = urlparse(data["webSocketDebuggerUrl"]).path
-        host = urlparse(preview_url).netloc
-        return f"wss://{host}{path}"
-
-
-def _tail_launcher_logs(sandbox, cmd) -> str:
-    """Best-effort fetch of the session command's stdout/stderr for diagnosis."""
-    cmd_id = getattr(cmd, "cmd_id", None) or getattr(cmd, "id", None)
-    if cmd_id is None:
-        return "<no command id available>"
-    try:
-        log = sandbox.process.get_session_command_logs(_SESSION_ID, cmd_id)
-    except Exception as e:
-        return f"<failed to fetch logs: {e}>"
-    return str(log) if log else "<empty>"
+# Global session state. None until browser_start succeeds.
+_session: BrowserSession | None = None
 
 
 # ============================================================================
@@ -167,95 +59,18 @@ async def browser_start(
     """
     global _session
 
-    if not DAYTONA_AVAILABLE:
-        return "Error: daytona-sdk is not installed. Please install it with: pip install daytona-sdk"
-
-    if not PATCHRIGHT_AVAILABLE:
-        return "Error: patchright is not installed. Please install it with: pip install patchright"
-
-    if _session.is_connected():
+    if _session is not None:
         return "Browser is already running. Use browser_stop first if you want to restart."
 
-    api_key = os.environ.get("DAYTONA_API_KEY")
-    if not api_key:
-        return "Error: DAYTONA_API_KEY environment variable is not set."
-
-    api_url = os.environ.get("DAYTONA_API_URL", os.environ.get("DAYTONA_SERVER_URL"))
-
     try:
-        # Initialize Daytona client (blocking SDK calls run in thread pool)
-        config = DaytonaConfig(api_key=api_key, api_url=api_url) if api_url else DaytonaConfig(api_key=api_key)
-        daytona = Daytona(config)
-
-        # Create sandbox using the default Python sandbox (has chromium + Xvfb)
-        sandbox = await asyncio.to_thread(daytona.create, timeout=timeout)
-
-        _session.sandbox = sandbox
-
-        await asyncio.to_thread(sandbox.fs.upload_file, _LAUNCHER_SCRIPT.encode(), _LAUNCHER_PATH)
-        await asyncio.to_thread(sandbox.process.create_session, _SESSION_ID)
-
-        # Start the desktop first — this is what VNC on 6080 streams. Chromium
-        # then launches into the same display (:0) so its window is visible.
-        # Previously chromium rendered to a separate Xvfb on :99, invisible to VNC.
-        await asyncio.to_thread(sandbox.computer_use.start)
-        vnc_preview = await asyncio.to_thread(sandbox.create_signed_preview_url, 6080)
-        _session._vnc_url = vnc_preview.url
-
-        from daytona_sdk import SessionExecuteRequest
-        cmd = await asyncio.to_thread(
-            sandbox.process.execute_session_command,
-            _SESSION_ID,
-            SessionExecuteRequest(
-                command=f"DISPLAY=:0 python {_LAUNCHER_PATH}",
-                run_async=True,
-            ),
-        )
-
-        # Wait for chromium to bind the CDP port.
-        await asyncio.sleep(15)
-
-        signed_preview = await asyncio.to_thread(sandbox.create_signed_preview_url, CDP_PORT)
-        signed = signed_preview.url
-        _session._signed_url = signed
-
-        # Connect via CDP using async playwright
-        pw = await async_playwright().start()
-        _session.playwright = pw
-
-        deadline = asyncio.get_event_loop().time() + timeout
-        last_err = None
-
-        while asyncio.get_event_loop().time() < deadline:
-            try:
-                ws_url = await asyncio.to_thread(_resolve_cdp_ws_url, signed)
-                browser = await pw.chromium.connect_over_cdp(ws_url)
-                _session.browser = browser
-
-                # Get or create a page
-                ctx = browser.contexts[0]
-                page = ctx.pages[0] if ctx.pages else await ctx.new_page()
-                _session.page = page
-
-                return f"Browser started successfully in Daytona sandbox. Ready for commands.\n\nLive view: {_session._vnc_url}"
-
-            except Exception as e:
-                last_err = e
-                await asyncio.sleep(2)
-
-        # Timeout - try to get logs
-        launcher_logs = await asyncio.to_thread(_tail_launcher_logs, sandbox, cmd)
-        return f"Error: Browser failed to start within {timeout}s. Last error: {last_err}\nLauncher logs:\n{launcher_logs}"
-
+        _session = await create_browser_session(timeout=timeout)
     except Exception as e:
-        # Clean up on failure
-        if _session.sandbox:
-            try:
-                await asyncio.to_thread(_session.sandbox.delete)
-            except:
-                pass
-        _session = BrowserSession()
-        return f"Error starting browser: {str(e)}"
+        return f"Error starting browser: {e}"
+
+    return (
+        "Browser started successfully in Daytona sandbox. Ready for commands.\n\n"
+        f"Live view: {_session.vnc_url}"
+    )
 
 
 @mcp.tool
@@ -267,30 +82,13 @@ async def browser_stop() -> str:
     """
     global _session
 
-    errors = []
+    if _session is None:
+        return "Browser is not running."
 
-    if _session.browser:
-        try:
-            await _session.browser.close()
-        except Exception as e:
-            errors.append(f"Error closing browser: {e}")
-
-    if _session.playwright:
-        try:
-            await _session.playwright.stop()
-        except Exception as e:
-            errors.append(f"Error stopping playwright: {e}")
-
-    if _session.sandbox:
-        try:
-            await asyncio.to_thread(_session.sandbox.delete)
-        except Exception as e:
-            errors.append(f"Error deleting sandbox: {e}")
-
-    _session = BrowserSession()
-
-    if errors:
-        return "Browser stopped with errors: " + "; ".join(errors)
+    try:
+        await _session.close()
+    finally:
+        _session = None
     return "Browser stopped and sandbox deleted successfully."
 
 
@@ -299,15 +97,15 @@ async def browser_status() -> str:
     """
     Check the current status of the browser session.
     """
-    if not _session.is_connected():
+    if _session is None:
         return "Browser is not running. Call browser_start to begin."
 
     try:
         url = _session.page.url
         title = await _session.page.title()
         status = f"Browser is running.\nCurrent URL: {url}\nPage title: {title}"
-        if _session._vnc_url:
-            status += f"\n\nLive view: {_session._vnc_url}"
+        if _session.vnc_url:
+            status += f"\n\nLive view: {_session.vnc_url}"
         return status
     except Exception as e:
         return f"Browser session exists but may be disconnected: {e}"
@@ -328,7 +126,7 @@ async def browser_navigate(
     """
     Navigate the browser to a URL.
     """
-    if not _session.is_connected():
+    if _session is None:
         return "Error: Browser is not running. Call browser_start first."
 
     try:
@@ -342,7 +140,7 @@ async def browser_navigate(
 @mcp.tool
 async def browser_back() -> str:
     """Navigate back in browser history."""
-    if not _session.is_connected():
+    if _session is None:
         return "Error: Browser is not running. Call browser_start first."
 
     try:
@@ -355,7 +153,7 @@ async def browser_back() -> str:
 @mcp.tool
 async def browser_forward() -> str:
     """Navigate forward in browser history."""
-    if not _session.is_connected():
+    if _session is None:
         return "Error: Browser is not running. Call browser_start first."
 
     try:
@@ -368,7 +166,7 @@ async def browser_forward() -> str:
 @mcp.tool
 async def browser_refresh() -> str:
     """Refresh the current page."""
-    if not _session.is_connected():
+    if _session is None:
         return "Error: Browser is not running. Call browser_start first."
 
     try:
@@ -398,7 +196,7 @@ async def browser_click(
     - XPath: "//button[@type='submit']"
     - Text: "text=Sign In", "text=Submit"
     """
-    if not _session.is_connected():
+    if _session is None:
         return "Error: Browser is not running. Call browser_start first."
 
     try:
@@ -419,7 +217,7 @@ async def browser_type(
     """
     Type text into an input field or editable element.
     """
-    if not _session.is_connected():
+    if _session is None:
         return "Error: Browser is not running. Call browser_start first."
 
     try:
@@ -444,7 +242,7 @@ async def browser_press(
     Key examples: Enter, Tab, Escape, Backspace, Delete, ArrowUp, ArrowDown,
     Control+a, Control+c, Control+v, Shift+Tab, Alt+F4
     """
-    if not _session.is_connected():
+    if _session is None:
         return "Error: Browser is not running. Call browser_start first."
 
     try:
@@ -465,7 +263,7 @@ async def browser_hover(
     """
     Hover over an element on the page.
     """
-    if not _session.is_connected():
+    if _session is None:
         return "Error: Browser is not running. Call browser_start first."
 
     try:
@@ -488,7 +286,7 @@ async def browser_select(
 
     Provide one of: value, label, or index.
     """
-    if not _session.is_connected():
+    if _session is None:
         return "Error: Browser is not running. Call browser_start first."
 
     try:
@@ -514,7 +312,7 @@ async def browser_scroll(
     """
     Scroll the page or a specific element.
     """
-    if not _session.is_connected():
+    if _session is None:
         return "Error: Browser is not running. Call browser_start first."
 
     try:
@@ -557,7 +355,7 @@ async def browser_screenshot(
 
     Returns the screenshot as an image that can be displayed.
     """
-    if not _session.is_connected():
+    if _session is None:
         raise ValueError("Browser is not running. Call browser_start first.")
 
     try:
@@ -579,7 +377,7 @@ async def browser_get_text(
     """
     Get text content from the page or specific elements.
     """
-    if not _session.is_connected():
+    if _session is None:
         return "Error: Browser is not running. Call browser_start first."
 
     try:
@@ -607,7 +405,7 @@ async def browser_get_html(
     """
     Get HTML content from the page or a specific element.
     """
-    if not _session.is_connected():
+    if _session is None:
         return "Error: Browser is not running. Call browser_start first."
 
     try:
@@ -632,7 +430,7 @@ async def browser_get_attribute(
     """
     Get an attribute value from an element.
     """
-    if not _session.is_connected():
+    if _session is None:
         return "Error: Browser is not running. Call browser_start first."
 
     try:
@@ -657,7 +455,7 @@ async def browser_evaluate(
     - "document.querySelectorAll('a').length"
     - "JSON.stringify(localStorage)"
     """
-    if not _session.is_connected():
+    if _session is None:
         return "Error: Browser is not running. Call browser_start first."
 
     try:
@@ -693,7 +491,7 @@ async def browser_wait_for_selector(
     - visible: Element is visible on the page
     - hidden: Element is hidden or removed
     """
-    if not _session.is_connected():
+    if _session is None:
         return "Error: Browser is not running. Call browser_start first."
 
     try:
@@ -711,7 +509,7 @@ async def browser_wait_for_navigation(
     """
     Wait for a navigation to complete.
     """
-    if not _session.is_connected():
+    if _session is None:
         return "Error: Browser is not running. Call browser_start first."
 
     try:
@@ -735,7 +533,7 @@ async def browser_new_tab(
     """
     Open a new browser tab and switch to it.
     """
-    if not _session.is_connected():
+    if _session is None:
         return "Error: Browser is not running. Call browser_start first."
 
     try:
@@ -756,7 +554,7 @@ async def browser_list_tabs() -> str:
     """
     List all open tabs with their URLs and titles.
     """
-    if not _session.is_connected():
+    if _session is None:
         return "Error: Browser is not running. Call browser_start first."
 
     try:
@@ -778,7 +576,7 @@ async def browser_switch_tab(
     """
     Switch to a different browser tab by index.
     """
-    if not _session.is_connected():
+    if _session is None:
         return "Error: Browser is not running. Call browser_start first."
 
     try:
@@ -802,7 +600,7 @@ async def browser_close_tab(
     """
     Close a browser tab.
     """
-    if not _session.is_connected():
+    if _session is None:
         return "Error: Browser is not running. Call browser_start first."
 
     try:
@@ -847,7 +645,7 @@ async def browser_upload_file(
 
     Note: The file must exist on the machine running this MCP server.
     """
-    if not _session.is_connected():
+    if _session is None:
         return "Error: Browser is not running. Call browser_start first."
 
     try:
@@ -866,7 +664,7 @@ async def browser_download_wait(
 
     Call this before triggering the download action.
     """
-    if not _session.is_connected():
+    if _session is None:
         return "Error: Browser is not running. Call browser_start first."
 
     # Note: This is a simplified implementation. Full download handling
