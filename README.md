@@ -1,12 +1,13 @@
 # Daytona Playwright MCP Server
 
-An MCP (Model Context Protocol) server that lets you control a full Chromium browser running inside a [Daytona](https://daytona.io) cloud sandbox. Use it with Claude Code, Claude Desktop, or any MCP-compatible client to browse the web, take screenshots, fill forms, and more.
+An MCP (Model Context Protocol) server that lets you control a stealth patchright+Chrome browser running inside a [Daytona](https://daytona.io) cloud sandbox. Use it with Claude Code, Claude Desktop, or any MCP-compatible client to browse the web, take screenshots, fill forms, and more.
 
 https://github.com/user-attachments/assets/23b13e1f-4ed3-4204-ad0d-b2fdb1f77d0d
 
 ## Features
 
-- **Full Chromium Browser**: Runs a real Chromium instance (not headless) in a virtual display
+- **Stealth Chrome**: Real Chrome (not headless, via [patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright)'s stealth patches) rendered into a virtual display
+- **Live VNC view**: The signed preview URL returned by `browser_start` streams the sandbox desktop, so you can watch what Claude is doing
 - **Cloud Sandbox**: Browser runs securely in a Daytona sandbox, isolated from your local machine
 - **Rich Tool Set**: Navigate, click, type, scroll, take screenshots, extract content, manage tabs
 - **Screenshot Support**: Returns screenshots as images that Claude can see and analyze
@@ -60,7 +61,7 @@ Once configured, you can ask Claude to browse the web:
 
 ### Workflow
 
-1. **Start the browser**: Claude will call `browser_start` to create a Daytona sandbox with Chromium
+1. **Start the browser**: Claude will call `browser_start` to create a Daytona sandbox and launch Chrome
 2. **Navigate and interact**: Use navigation, clicking, typing, and other tools
 3. **Take screenshots**: See what's on the page with `browser_screenshot`
 4. **Clean up**: Call `browser_stop` when done to delete the sandbox
@@ -192,12 +193,12 @@ uv run pytest
 ## How It Works
 
 1. When you call `browser_start`, the server:
-   - Creates a Daytona sandbox (default Python sandbox has Chromium + Xvfb pre-installed)
-   - Launches Chromium with remote debugging enabled
-   - Starts a TCP proxy to expose the CDP port externally
-   - Connects to Chromium via CDP (Chrome DevTools Protocol) through Daytona's secure signed URLs
+   - Builds a minimal Daytona sandbox image declaratively (xfce + VNC stack for `computer_use`, plus patchright with the Chrome channel)
+   - Starts `computer_use` so the sandbox desktop is streamed on port 6080 (the returned "Live view" URL)
+   - Launches Chrome via patchright into `DISPLAY=:0` with CDP bound on `0.0.0.0:9222` — no TCP proxy needed, since patchright's stealth patches are applied at launch time
+   - Connects to Chrome over a signed CDP WebSocket through Daytona's secure preview URL
 
-2. All browser commands are executed through the Playwright API connected to the remote browser
+2. All browser commands are executed through the async Playwright API connected to the remote browser
 
 3. Screenshots are captured as PNG images and returned via MCP's image content type
 
