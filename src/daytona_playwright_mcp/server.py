@@ -144,6 +144,16 @@ mcp = FastMCP(
     3. Use `browser_screenshot` to see what's on the page
     4. When done, call `browser_stop` to clean up
 
+    Form Management:
+    - Use `browser_form_list` to discover all forms on a page
+    - Use `browser_form_get_fields` to see all fields in a form with their current values
+    - Use `browser_form_fill` to fill multiple fields at once with a JSON mapping
+    - Use `browser_form_submit` to submit a form
+    - Use `browser_form_reset` to clear a form
+    - Use `browser_checkbox_set` and `browser_radio_select` for checkboxes and radios
+    - Use `browser_form_get_validation` to check HTML5 validation errors
+    - Use `browser_form_focus` and `browser_form_blur` for focus management
+
     The browser runs in a secure cloud sandbox with full Chrome capabilities.
     Screenshots are returned as base64-encoded images.
     """
@@ -830,6 +840,496 @@ async def browser_close_tab(
             return f"Closed tab {index}"
     except Exception as e:
         return f"Error closing tab: {e}"
+
+
+# ============================================================================
+# Form Management Tools
+# ============================================================================
+
+@mcp.tool
+async def browser_form_list(
+    timeout: Annotated[int, "Timeout in milliseconds"] = 30000
+) -> str:
+    """
+    List all forms on the current page with their attributes and field counts.
+
+    Returns information about each form including:
+    - Form index (for use with other form tools)
+    - Form id, name, action, method attributes
+    - Number of input fields
+    """
+    if not _session.is_connected():
+        return "Error: Browser is not running. Call browser_start first."
+
+    try:
+        forms_info = await _session.page.evaluate("""
+            () => {
+                const forms = document.querySelectorAll('form');
+                return Array.from(forms).map((form, index) => {
+                    const inputs = form.querySelectorAll('input, select, textarea');
+                    return {
+                        index: index,
+                        id: form.id || null,
+                        name: form.name || null,
+                        action: form.action || null,
+                        method: form.method || 'get',
+                        fieldCount: inputs.length
+                    };
+                });
+            }
+        """)
+
+        if not forms_info:
+            return "No forms found on the page."
+
+        result = []
+        for form in forms_info:
+            info = f"Form {form['index']}:"
+            if form['id']:
+                info += f" id='{form['id']}'"
+            if form['name']:
+                info += f" name='{form['name']}'"
+            info += f" method={form['method']}"
+            if form['action']:
+                info += f" action='{form['action']}'"
+            info += f" ({form['fieldCount']} fields)"
+            result.append(info)
+
+        return "\n".join(result)
+    except Exception as e:
+        return f"Error listing forms: {e}"
+
+
+@mcp.tool
+async def browser_form_get_fields(
+    selector: Annotated[str | None, "CSS selector for a specific form. If not provided, gets fields from the first form."] = None,
+    timeout: Annotated[int, "Timeout in milliseconds"] = 30000
+) -> str:
+    """
+    Get all fields from a form with their current values and attributes.
+
+    Returns detailed information about each field including:
+    - Field type (text, email, password, checkbox, radio, select, textarea, etc.)
+    - Field name, id, placeholder
+    - Current value
+    - Required/disabled status
+    - Options for select elements
+    """
+    if not _session.is_connected():
+        return "Error: Browser is not running. Call browser_start first."
+
+    try:
+        form_selector = selector or "form"
+
+        fields_info = await _session.page.evaluate(f"""
+            (formSelector) => {{
+                const form = document.querySelector(formSelector);
+                if (!form) return null;
+
+                const fields = form.querySelectorAll('input, select, textarea');
+                return Array.from(fields).map(field => {{
+                    const info = {{
+                        tagName: field.tagName.toLowerCase(),
+                        type: field.type || null,
+                        name: field.name || null,
+                        id: field.id || null,
+                        placeholder: field.placeholder || null,
+                        value: field.value || '',
+                        required: field.required || false,
+                        disabled: field.disabled || false,
+                        readOnly: field.readOnly || false
+                    }};
+
+                    // Handle checkboxes and radios
+                    if (field.type === 'checkbox' || field.type === 'radio') {{
+                        info.checked = field.checked;
+                    }}
+
+                    // Handle select elements
+                    if (field.tagName.toLowerCase() === 'select') {{
+                        info.options = Array.from(field.options).map(opt => ({{
+                            value: opt.value,
+                            text: opt.text,
+                            selected: opt.selected
+                        }}));
+                        info.multiple = field.multiple;
+                    }}
+
+                    return info;
+                }});
+            }}
+        """, form_selector)
+
+        if fields_info is None:
+            return f"No form found matching selector: {form_selector}"
+
+        if not fields_info:
+            return "Form found but contains no fields."
+
+        result = []
+        for i, field in enumerate(fields_info):
+            field_type = field.get('type') or field['tagName']
+            identifier = field['name'] or field['id'] or f"[field {i}]"
+
+            line = f"- {identifier} ({field_type})"
+
+            if field.get('value'):
+                line += f": '{field['value']}'"
+            if field.get('checked'):
+                line += " [checked]"
+            if field.get('required'):
+                line += " [required]"
+            if field.get('disabled'):
+                line += " [disabled]"
+            if field.get('readOnly'):
+                line += " [readonly]"
+            if field.get('placeholder'):
+                line += f" placeholder='{field['placeholder']}'"
+
+            # Show select options
+            if field.get('options'):
+                opts = ", ".join([f"'{o['value']}'" + (" *" if o['selected'] else "") for o in field['options'][:5]])
+                if len(field['options']) > 5:
+                    opts += f" ... (+{len(field['options']) - 5} more)"
+                line += f" options=[{opts}]"
+
+            result.append(line)
+
+        return "\n".join(result)
+    except Exception as e:
+        return f"Error getting form fields: {e}"
+
+
+@mcp.tool
+async def browser_form_fill(
+    data: Annotated[str, "JSON object mapping field selectors or names to values. Example: {\"#email\": \"test@example.com\", \"password\": \"secret\"}"],
+    selector: Annotated[str | None, "CSS selector for a specific form. If not provided, searches the entire page."] = None,
+    timeout: Annotated[int, "Timeout in milliseconds"] = 30000
+) -> str:
+    """
+    Fill multiple form fields at once using a JSON mapping.
+
+    The data parameter should be a JSON object where:
+    - Keys can be CSS selectors (e.g., "#email", "[name='username']") or field names
+    - Values are the text to fill, or for checkboxes/radios: true/false
+
+    Examples:
+    - '{"#email": "user@example.com", "#password": "secret123"}'
+    - '{"username": "john", "remember_me": true}'
+    """
+    if not _session.is_connected():
+        return "Error: Browser is not running. Call browser_start first."
+
+    try:
+        field_data = json.loads(data)
+    except json.JSONDecodeError as e:
+        return f"Error: Invalid JSON data: {e}"
+
+    if not isinstance(field_data, dict):
+        return "Error: Data must be a JSON object (dictionary)"
+
+    results = []
+    errors = []
+
+    for field_key, value in field_data.items():
+        try:
+            # Build the selector - if it looks like a selector, use it directly
+            # Otherwise, try to find by name attribute within the form
+            if field_key.startswith('#') or field_key.startswith('.') or field_key.startswith('[') or ' ' in field_key:
+                field_selector = field_key
+            else:
+                # Try to find by name within the form context
+                form_prefix = f"{selector} " if selector else ""
+                field_selector = f"{form_prefix}[name='{field_key}']"
+
+            # Get field info to determine how to fill it
+            field_info = await _session.page.evaluate(f"""
+                (sel) => {{
+                    const el = document.querySelector(sel);
+                    if (!el) return null;
+                    return {{
+                        tagName: el.tagName.toLowerCase(),
+                        type: el.type || null
+                    }};
+                }}
+            """, field_selector)
+
+            if field_info is None:
+                errors.append(f"Field not found: {field_key}")
+                continue
+
+            field_type = field_info.get('type', '').lower()
+            tag_name = field_info['tagName']
+
+            # Handle different field types
+            if field_type in ('checkbox', 'radio'):
+                is_checked = await _session.page.is_checked(field_selector)
+                should_check = bool(value)
+                if should_check and not is_checked:
+                    await _session.page.check(field_selector, timeout=timeout)
+                    results.append(f"Checked: {field_key}")
+                elif not should_check and is_checked:
+                    await _session.page.uncheck(field_selector, timeout=timeout)
+                    results.append(f"Unchecked: {field_key}")
+                else:
+                    results.append(f"Already {'checked' if is_checked else 'unchecked'}: {field_key}")
+            elif tag_name == 'select':
+                await _session.page.select_option(field_selector, value=str(value), timeout=timeout)
+                results.append(f"Selected '{value}' in: {field_key}")
+            else:
+                await _session.page.fill(field_selector, str(value), timeout=timeout)
+                results.append(f"Filled: {field_key}")
+
+        except Exception as e:
+            errors.append(f"Error with {field_key}: {str(e)}")
+
+    output = []
+    if results:
+        output.append("Successfully filled:")
+        output.extend(f"  {r}" for r in results)
+    if errors:
+        output.append("Errors:")
+        output.extend(f"  {e}" for e in errors)
+
+    return "\n".join(output) if output else "No fields processed"
+
+
+@mcp.tool
+async def browser_form_submit(
+    selector: Annotated[str | None, "CSS selector for the form or submit button. If not provided, submits the first form."] = None,
+    wait_for_navigation: Annotated[bool, "Whether to wait for page navigation after submit"] = True,
+    timeout: Annotated[int, "Timeout in milliseconds"] = 30000
+) -> str:
+    """
+    Submit a form by clicking its submit button or triggering form submission.
+
+    This tool will:
+    1. Find the submit button within the form and click it
+    2. Or trigger the form's submit event if no button is found
+    3. Optionally wait for navigation to complete
+    """
+    if not _session.is_connected():
+        return "Error: Browser is not running. Call browser_start first."
+
+    try:
+        form_selector = selector or "form"
+
+        # Try to find and click a submit button first
+        submit_selectors = [
+            f"{form_selector} button[type='submit']",
+            f"{form_selector} input[type='submit']",
+            f"{form_selector} button:not([type])",  # Buttons without type default to submit
+        ]
+
+        button_found = False
+        for btn_selector in submit_selectors:
+            try:
+                count = await _session.page.locator(btn_selector).count()
+                if count > 0:
+                    if wait_for_navigation:
+                        async with _session.page.expect_navigation(timeout=timeout):
+                            await _session.page.click(btn_selector, timeout=timeout)
+                    else:
+                        await _session.page.click(btn_selector, timeout=timeout)
+                    button_found = True
+                    break
+            except:
+                continue
+
+        if not button_found:
+            # Fall back to programmatic form submission
+            if wait_for_navigation:
+                async with _session.page.expect_navigation(timeout=timeout):
+                    await _session.page.evaluate(f"document.querySelector('{form_selector}').submit()")
+            else:
+                await _session.page.evaluate(f"document.querySelector('{form_selector}').submit()")
+
+        url = _session.page.url
+        return f"Form submitted successfully. Current URL: {url}"
+    except Exception as e:
+        return f"Error submitting form: {e}"
+
+
+@mcp.tool
+async def browser_form_reset(
+    selector: Annotated[str | None, "CSS selector for the form to reset. If not provided, resets the first form."] = None,
+    timeout: Annotated[int, "Timeout in milliseconds"] = 30000
+) -> str:
+    """
+    Reset a form to its initial values.
+
+    This clears all user input and restores default values for all fields.
+    """
+    if not _session.is_connected():
+        return "Error: Browser is not running. Call browser_start first."
+
+    try:
+        form_selector = selector or "form"
+
+        result = await _session.page.evaluate(f"""
+            (formSelector) => {{
+                const form = document.querySelector(formSelector);
+                if (!form) return {{ success: false, error: 'Form not found' }};
+                form.reset();
+                return {{ success: true }};
+            }}
+        """, form_selector)
+
+        if not result['success']:
+            return f"Error: {result.get('error', 'Unknown error')}"
+
+        return f"Form reset successfully: {form_selector}"
+    except Exception as e:
+        return f"Error resetting form: {e}"
+
+
+@mcp.tool
+async def browser_checkbox_set(
+    selector: Annotated[str, "CSS selector for the checkbox element"],
+    checked: Annotated[bool, "Whether the checkbox should be checked"] = True,
+    timeout: Annotated[int, "Timeout in milliseconds"] = 30000
+) -> str:
+    """
+    Set a checkbox to checked or unchecked state.
+    """
+    if not _session.is_connected():
+        return "Error: Browser is not running. Call browser_start first."
+
+    try:
+        if checked:
+            await _session.page.check(selector, timeout=timeout)
+            return f"Checkbox checked: {selector}"
+        else:
+            await _session.page.uncheck(selector, timeout=timeout)
+            return f"Checkbox unchecked: {selector}"
+    except Exception as e:
+        return f"Error setting checkbox {selector}: {e}"
+
+
+@mcp.tool
+async def browser_radio_select(
+    selector: Annotated[str, "CSS selector for the radio button to select"],
+    timeout: Annotated[int, "Timeout in milliseconds"] = 30000
+) -> str:
+    """
+    Select a radio button option.
+
+    Example selectors:
+    - By value: "input[name='color'][value='red']"
+    - By id: "#radio-option-1"
+    """
+    if not _session.is_connected():
+        return "Error: Browser is not running. Call browser_start first."
+
+    try:
+        await _session.page.check(selector, timeout=timeout)
+        return f"Radio button selected: {selector}"
+    except Exception as e:
+        return f"Error selecting radio button {selector}: {e}"
+
+
+@mcp.tool
+async def browser_form_get_validation(
+    selector: Annotated[str | None, "CSS selector for a specific form. If not provided, checks the first form."] = None,
+    timeout: Annotated[int, "Timeout in milliseconds"] = 30000
+) -> str:
+    """
+    Get HTML5 validation state and messages for all fields in a form.
+
+    Returns validation status including:
+    - Which fields are invalid
+    - Validation error messages
+    - Whether the form is valid overall
+    """
+    if not _session.is_connected():
+        return "Error: Browser is not running. Call browser_start first."
+
+    try:
+        form_selector = selector or "form"
+
+        validation_info = await _session.page.evaluate(f"""
+            (formSelector) => {{
+                const form = document.querySelector(formSelector);
+                if (!form) return null;
+
+                const fields = form.querySelectorAll('input, select, textarea');
+                const fieldValidation = Array.from(fields).map(field => {{
+                    const name = field.name || field.id || '[unnamed]';
+                    return {{
+                        name: name,
+                        valid: field.validity.valid,
+                        message: field.validationMessage || null,
+                        valueMissing: field.validity.valueMissing,
+                        typeMismatch: field.validity.typeMismatch,
+                        patternMismatch: field.validity.patternMismatch,
+                        tooShort: field.validity.tooShort,
+                        tooLong: field.validity.tooLong,
+                        rangeUnderflow: field.validity.rangeUnderflow,
+                        rangeOverflow: field.validity.rangeOverflow
+                    }};
+                }}).filter(f => !f.valid);
+
+                return {{
+                    formValid: form.checkValidity(),
+                    invalidFields: fieldValidation
+                }};
+            }}
+        """, form_selector)
+
+        if validation_info is None:
+            return f"No form found matching selector: {form_selector}"
+
+        if validation_info['formValid']:
+            return "Form is valid. All fields pass validation."
+
+        result = ["Form has validation errors:"]
+        for field in validation_info['invalidFields']:
+            msg = field['message'] or "Invalid"
+            result.append(f"  - {field['name']}: {msg}")
+
+        return "\n".join(result)
+    except Exception as e:
+        return f"Error checking form validation: {e}"
+
+
+@mcp.tool
+async def browser_form_focus(
+    selector: Annotated[str, "CSS selector for the element to focus"],
+    timeout: Annotated[int, "Timeout in milliseconds"] = 30000
+) -> str:
+    """
+    Focus on a specific form field.
+
+    This is useful for triggering focus-related events or preparing for keyboard input.
+    """
+    if not _session.is_connected():
+        return "Error: Browser is not running. Call browser_start first."
+
+    try:
+        await _session.page.focus(selector, timeout=timeout)
+        return f"Focused on element: {selector}"
+    except Exception as e:
+        return f"Error focusing on {selector}: {e}"
+
+
+@mcp.tool
+async def browser_form_blur(
+    selector: Annotated[str, "CSS selector for the element to blur (unfocus)"],
+    timeout: Annotated[int, "Timeout in milliseconds"] = 30000
+) -> str:
+    """
+    Remove focus from a specific form field (blur).
+
+    This is useful for triggering blur-related validation events.
+    """
+    if not _session.is_connected():
+        return "Error: Browser is not running. Call browser_start first."
+
+    try:
+        await _session.page.evaluate(f"document.querySelector('{selector}').blur()")
+        return f"Blurred element: {selector}"
+    except Exception as e:
+        return f"Error blurring {selector}: {e}"
 
 
 # ============================================================================
