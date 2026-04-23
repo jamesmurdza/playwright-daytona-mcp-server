@@ -146,6 +146,12 @@ mcp = FastMCP(
 
     The browser runs in a secure cloud sandbox with full Chrome capabilities.
     Screenshots are returned as base64-encoded images.
+
+    Cookie Management:
+    - Use `browser_get_cookies` to retrieve cookies (all or filtered by URL)
+    - Use `browser_set_cookie` to create or update a cookie
+    - Use `browser_delete_cookies` to remove specific cookies by name/domain/path
+    - Use `browser_clear_cookies` to remove all cookies at once
     """
 )
 
@@ -830,6 +836,186 @@ async def browser_close_tab(
             return f"Closed tab {index}"
     except Exception as e:
         return f"Error closing tab: {e}"
+
+
+# ============================================================================
+# Cookie Management Tools
+# ============================================================================
+
+@mcp.tool
+async def browser_get_cookies(
+    urls: Annotated[list[str] | None, "Optional list of URLs to get cookies for. If not provided, gets all cookies."] = None
+) -> str:
+    """
+    Get cookies from the browser.
+
+    If URLs are provided, only returns cookies that apply to those URLs.
+    Otherwise, returns all cookies in the browser context.
+
+    Returns cookies as a JSON array with properties: name, value, domain, path, expires, httpOnly, secure, sameSite.
+    """
+    if not _session.is_connected():
+        return "Error: Browser is not running. Call browser_start first."
+
+    try:
+        ctx = _session.browser.contexts[0]
+        if urls:
+            cookies = await ctx.cookies(urls)
+        else:
+            cookies = await ctx.cookies()
+
+        if not cookies:
+            return "No cookies found."
+
+        # Format cookies for readability
+        formatted = []
+        for cookie in cookies:
+            formatted.append({
+                "name": cookie.get("name"),
+                "value": cookie.get("value"),
+                "domain": cookie.get("domain"),
+                "path": cookie.get("path"),
+                "expires": cookie.get("expires"),
+                "httpOnly": cookie.get("httpOnly"),
+                "secure": cookie.get("secure"),
+                "sameSite": cookie.get("sameSite"),
+            })
+
+        return json.dumps(formatted, indent=2)
+    except Exception as e:
+        return f"Error getting cookies: {e}"
+
+
+@mcp.tool
+async def browser_set_cookie(
+    name: Annotated[str, "Name of the cookie"],
+    value: Annotated[str, "Value of the cookie"],
+    url: Annotated[str | None, "URL to associate the cookie with (sets domain and path automatically)"] = None,
+    domain: Annotated[str | None, "Domain for the cookie (e.g., '.example.com'). Required if url is not provided."] = None,
+    path: Annotated[str, "Path for the cookie"] = "/",
+    expires: Annotated[float | None, "Unix timestamp when the cookie expires. If not provided, creates a session cookie."] = None,
+    http_only: Annotated[bool, "Whether the cookie is HTTP-only (not accessible via JavaScript)"] = False,
+    secure: Annotated[bool, "Whether the cookie requires HTTPS"] = False,
+    same_site: Annotated[Literal["Strict", "Lax", "None"], "SameSite attribute for the cookie"] = "Lax"
+) -> str:
+    """
+    Set a cookie in the browser.
+
+    Either 'url' or 'domain' must be provided.
+    Use 'url' for convenience (domain and path are inferred).
+    Use 'domain' for more control over the cookie scope.
+
+    Examples:
+    - Set session cookie: browser_set_cookie(name="session", value="abc123", url="https://example.com")
+    - Set persistent cookie: browser_set_cookie(name="prefs", value="dark", domain=".example.com", expires=1735689600)
+    """
+    if not _session.is_connected():
+        return "Error: Browser is not running. Call browser_start first."
+
+    if not url and not domain:
+        return "Error: Either 'url' or 'domain' must be provided."
+
+    try:
+        ctx = _session.browser.contexts[0]
+
+        cookie = {
+            "name": name,
+            "value": value,
+            "path": path,
+            "httpOnly": http_only,
+            "secure": secure,
+            "sameSite": same_site,
+        }
+
+        if url:
+            cookie["url"] = url
+        if domain:
+            cookie["domain"] = domain
+        if expires is not None:
+            cookie["expires"] = expires
+
+        await ctx.add_cookies([cookie])
+
+        return f"Cookie '{name}' set successfully."
+    except Exception as e:
+        return f"Error setting cookie: {e}"
+
+
+@mcp.tool
+async def browser_delete_cookies(
+    name: Annotated[str | None, "Name of the cookie to delete. If not provided with domain/path, deletes all matching."] = None,
+    domain: Annotated[str | None, "Domain of the cookies to delete"] = None,
+    path: Annotated[str | None, "Path of the cookies to delete"] = None
+) -> str:
+    """
+    Delete specific cookies from the browser.
+
+    You can filter by name, domain, and/or path. All provided filters must match.
+    If no filters are provided, this will do nothing (use browser_clear_cookies to delete all).
+
+    Examples:
+    - Delete by name: browser_delete_cookies(name="session")
+    - Delete by domain: browser_delete_cookies(domain=".example.com")
+    - Delete specific cookie: browser_delete_cookies(name="session", domain="example.com")
+    """
+    if not _session.is_connected():
+        return "Error: Browser is not running. Call browser_start first."
+
+    if not name and not domain and not path:
+        return "Error: At least one filter (name, domain, or path) must be provided. Use browser_clear_cookies to delete all cookies."
+
+    try:
+        ctx = _session.browser.contexts[0]
+
+        # Get all cookies first
+        all_cookies = await ctx.cookies()
+
+        # Filter cookies to keep (inverse of what we want to delete)
+        cookies_to_keep = []
+        deleted_count = 0
+
+        for cookie in all_cookies:
+            should_delete = True
+
+            if name is not None and cookie.get("name") != name:
+                should_delete = False
+            if domain is not None and cookie.get("domain") != domain:
+                should_delete = False
+            if path is not None and cookie.get("path") != path:
+                should_delete = False
+
+            if should_delete:
+                deleted_count += 1
+            else:
+                cookies_to_keep.append(cookie)
+
+        # Clear all cookies and re-add the ones we want to keep
+        await ctx.clear_cookies()
+        if cookies_to_keep:
+            await ctx.add_cookies(cookies_to_keep)
+
+        return f"Deleted {deleted_count} cookie(s)."
+    except Exception as e:
+        return f"Error deleting cookies: {e}"
+
+
+@mcp.tool
+async def browser_clear_cookies() -> str:
+    """
+    Clear all cookies from the browser.
+
+    This removes all cookies from the browser context, effectively logging out
+    of all websites and clearing all stored preferences.
+    """
+    if not _session.is_connected():
+        return "Error: Browser is not running. Call browser_start first."
+
+    try:
+        ctx = _session.browser.contexts[0]
+        await ctx.clear_cookies()
+        return "All cookies cleared successfully."
+    except Exception as e:
+        return f"Error clearing cookies: {e}"
 
 
 # ============================================================================
