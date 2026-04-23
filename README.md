@@ -115,6 +115,14 @@ Once configured, you can ask Claude to browse the web:
 | `browser_switch_tab` | Switch to a different tab |
 | `browser_close_tab` | Close a tab |
 
+### Cookie Management
+| Tool | Description |
+|------|-------------|
+| `browser_get_cookies` | Get cookies from the browser (all or filtered by URL) |
+| `browser_set_cookie` | Set a cookie with name, value, domain, expiry, etc. |
+| `browser_delete_cookies` | Delete specific cookies by name, domain, or path |
+| `browser_clear_cookies` | Clear all cookies from the browser |
+
 ### File Operations
 | Tool | Description |
 |------|-------------|
