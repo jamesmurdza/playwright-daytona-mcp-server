@@ -13,7 +13,8 @@ import os
 import sys
 import urllib.request
 from dataclasses import dataclass
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Optional
+import time
 from urllib.parse import urlparse
 
 from fastmcp import FastMCP
@@ -87,6 +88,18 @@ signal.pause()
 # ============================================================================
 
 @dataclass
+class DownloadInfo:
+    """Information about a tracked download."""
+    url: str
+    suggested_filename: str
+    path: str | None = None
+    state: Literal["pending", "completed", "failed", "cancelled"] = "pending"
+    error: str | None = None
+    failure_reason: str | None = None
+    bytes_received: int = 0
+
+
+@dataclass
 class BrowserSession:
     """Manages a browser session inside a Daytona sandbox."""
     sandbox: object = None
@@ -95,10 +108,25 @@ class BrowserSession:
     playwright: object = None
     _signed_url: str = ""
     _vnc_url: str = ""
+    _downloads: list = None  # List of DownloadInfo
+    _download_events: dict = None  # Download ID -> asyncio.Event for completion
+    _active_download: object = None  # Currently monitored Playwright Download object
+
+    def __post_init__(self):
+        if self._downloads is None:
+            self._downloads = []
+        if self._download_events is None:
+            self._download_events = {}
 
     def is_connected(self) -> bool:
         """Check if browser is connected and usable."""
         return self.browser is not None and self.page is not None
+
+    def clear_downloads(self):
+        """Clear download tracking state."""
+        self._downloads = []
+        self._download_events = {}
+        self._active_download = None
 
 
 # Global session state
@@ -143,6 +171,14 @@ mcp = FastMCP(
     2. Use navigation tools (`browser_navigate`, `browser_click`, `browser_type`, etc.)
     3. Use `browser_screenshot` to see what's on the page
     4. When done, call `browser_stop` to clean up
+
+    Download Handling:
+    - Use `browser_download_click` to click a link/button that triggers a download
+    - Use `browser_download_url` to download directly from a URL
+    - Use `browser_download_list` to see all downloads and their status
+    - Use `browser_download_read` to read the content of a downloaded file
+    - Use `browser_download_save` to copy a download to a specific location
+    - Use `browser_download_delete` to clean up downloaded files
 
     The browser runs in a secure cloud sandbox with full Chrome capabilities.
     Screenshots are returned as base64-encoded images.
@@ -287,6 +323,7 @@ async def browser_stop() -> str:
         except Exception as e:
             errors.append(f"Error deleting sandbox: {e}")
 
+    # Create new session (which initializes empty download tracking)
     _session = BrowserSession()
 
     if errors:
@@ -858,20 +895,378 @@ async def browser_upload_file(
 
 
 @mcp.tool
-async def browser_download_wait(
-    timeout: Annotated[int, "Timeout in milliseconds to wait for download"] = 60000
+async def browser_download_click(
+    selector: Annotated[str, "CSS selector for the element that triggers the download"],
+    timeout: Annotated[int, "Timeout in milliseconds to wait for download to complete"] = 60000,
+    save_as: Annotated[str | None, "Optional custom filename to save the download as"] = None
 ) -> str:
     """
-    Wait for a download to start and complete, returning the downloaded file path.
+    Click an element that triggers a download, wait for the download to complete,
+    and return information about the downloaded file.
 
-    Call this before triggering the download action.
+    This handles the full download flow:
+    1. Sets up download monitoring
+    2. Clicks the element to trigger the download
+    3. Waits for the download to complete
+    4. Returns the file path and details
+
+    Example:
+    - browser_download_click("a.download-link")
+    - browser_download_click("#export-button", timeout=120000)
+    - browser_download_click("text=Download PDF", save_as="report.pdf")
     """
     if not _session.is_connected():
         return "Error: Browser is not running. Call browser_start first."
 
-    # Note: This is a simplified implementation. Full download handling
-    # would require more complex async patterns.
-    return "Download monitoring not yet implemented. Downloads will save to the sandbox's default location."
+    try:
+        # Start waiting for download before clicking
+        async with _session.page.expect_download(timeout=timeout) as download_info:
+            await _session.page.click(selector)
+
+        download = await download_info.value
+
+        # Track download info
+        info = DownloadInfo(
+            url=download.url,
+            suggested_filename=download.suggested_filename,
+            state="pending"
+        )
+        _session._downloads.append(info)
+        download_idx = len(_session._downloads) - 1
+
+        # Wait for download to complete
+        try:
+            if save_as:
+                # Save with custom filename
+                save_path = f"/tmp/downloads/{save_as}"
+                await download.save_as(save_path)
+                info.path = save_path
+            else:
+                # Use default path (waits for download to finish)
+                path = await download.path()
+                info.path = str(path) if path else None
+
+            failure = await download.failure()
+            if failure:
+                info.state = "failed"
+                info.failure_reason = failure
+                return f"Download failed: {failure}\nURL: {download.url}\nSuggested filename: {download.suggested_filename}"
+
+            info.state = "completed"
+            return f"Download completed successfully!\nFilename: {download.suggested_filename}\nPath: {info.path}\nURL: {download.url}\nDownload index: {download_idx}"
+
+        except Exception as e:
+            info.state = "failed"
+            info.error = str(e)
+            return f"Error during download: {e}"
+
+    except Exception as e:
+        return f"Error triggering download from {selector}: {e}"
+
+
+@mcp.tool
+async def browser_download_wait(
+    timeout: Annotated[int, "Timeout in milliseconds to wait for download"] = 60000
+) -> str:
+    """
+    Wait for a download to start (triggered by any action) and complete.
+
+    Use this when a download might be triggered by JavaScript or other async actions.
+    Call this BEFORE the action that triggers the download.
+
+    For click-triggered downloads, prefer browser_download_click() instead.
+
+    Returns information about the completed download.
+    """
+    if not _session.is_connected():
+        return "Error: Browser is not running. Call browser_start first."
+
+    try:
+        # Wait for any download to start
+        async with _session.page.expect_download(timeout=timeout) as download_info:
+            # The download should be triggered by something else
+            pass
+
+        download = await download_info.value
+
+        # Track download info
+        info = DownloadInfo(
+            url=download.url,
+            suggested_filename=download.suggested_filename,
+            state="pending"
+        )
+        _session._downloads.append(info)
+        download_idx = len(_session._downloads) - 1
+
+        # Wait for download to complete
+        path = await download.path()
+        failure = await download.failure()
+
+        if failure:
+            info.state = "failed"
+            info.failure_reason = failure
+            return f"Download failed: {failure}\nURL: {download.url}"
+
+        info.path = str(path) if path else None
+        info.state = "completed"
+
+        return f"Download completed!\nFilename: {download.suggested_filename}\nPath: {info.path}\nURL: {download.url}\nDownload index: {download_idx}"
+
+    except Exception as e:
+        return f"Error waiting for download: {e}"
+
+
+@mcp.tool
+async def browser_download_url(
+    url: Annotated[str, "Direct URL to download"],
+    filename: Annotated[str | None, "Custom filename to save the file as"] = None,
+    timeout: Annotated[int, "Timeout in milliseconds"] = 60000
+) -> str:
+    """
+    Download a file directly from a URL using the browser's download capabilities.
+
+    This navigates to the URL in a way that triggers a download, useful for
+    direct file links.
+
+    Example:
+    - browser_download_url("https://example.com/file.pdf")
+    - browser_download_url("https://example.com/export?format=csv", filename="data.csv")
+    """
+    if not _session.is_connected():
+        return "Error: Browser is not running. Call browser_start first."
+
+    try:
+        # Use JavaScript to trigger download
+        download_script = f"""
+        () => {{
+            const a = document.createElement('a');
+            a.href = '{url}';
+            a.download = '{filename if filename else ""}';
+            a.style.display = 'none';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+        }}
+        """
+
+        # Start waiting for download before triggering
+        async with _session.page.expect_download(timeout=timeout) as download_info:
+            await _session.page.evaluate(download_script)
+
+        download = await download_info.value
+
+        # Track download
+        info = DownloadInfo(
+            url=download.url,
+            suggested_filename=download.suggested_filename,
+            state="pending"
+        )
+        _session._downloads.append(info)
+        download_idx = len(_session._downloads) - 1
+
+        # Wait for completion
+        if filename:
+            save_path = f"/tmp/downloads/{filename}"
+            await download.save_as(save_path)
+            info.path = save_path
+        else:
+            path = await download.path()
+            info.path = str(path) if path else None
+
+        failure = await download.failure()
+        if failure:
+            info.state = "failed"
+            info.failure_reason = failure
+            return f"Download failed: {failure}"
+
+        info.state = "completed"
+        return f"Download completed!\nFilename: {download.suggested_filename}\nPath: {info.path}\nDownload index: {download_idx}"
+
+    except Exception as e:
+        return f"Error downloading from URL: {e}"
+
+
+@mcp.tool
+async def browser_download_list() -> str:
+    """
+    List all downloads from the current session with their status and paths.
+
+    Returns a list of all tracked downloads including pending, completed, and failed ones.
+    """
+    if not _session.is_connected():
+        return "Error: Browser is not running. Call browser_start first."
+
+    if not _session._downloads:
+        return "No downloads recorded in this session."
+
+    lines = ["Downloads in this session:", ""]
+    for i, dl in enumerate(_session._downloads):
+        status_icon = {
+            "pending": "⏳",
+            "completed": "✅",
+            "failed": "❌",
+            "cancelled": "🚫"
+        }.get(dl.state, "❓")
+
+        lines.append(f"{i}. {status_icon} {dl.suggested_filename}")
+        lines.append(f"   State: {dl.state}")
+        lines.append(f"   URL: {dl.url}")
+        if dl.path:
+            lines.append(f"   Path: {dl.path}")
+        if dl.failure_reason:
+            lines.append(f"   Failure: {dl.failure_reason}")
+        if dl.error:
+            lines.append(f"   Error: {dl.error}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+@mcp.tool
+async def browser_download_read(
+    index: Annotated[int, "Index of the download to read (from browser_download_list)"],
+    encoding: Annotated[str, "Text encoding to use (use 'binary' for base64 output)"] = "utf-8",
+    max_bytes: Annotated[int, "Maximum bytes to read (0 for all)"] = 0
+) -> str:
+    """
+    Read the contents of a downloaded file.
+
+    For text files, returns the content as text.
+    For binary files, use encoding='binary' to get base64-encoded content.
+
+    Use browser_download_list() first to see available downloads and their indices.
+    """
+    if not _session.is_connected():
+        return "Error: Browser is not running. Call browser_start first."
+
+    if not _session._downloads:
+        return "Error: No downloads recorded in this session."
+
+    if index < 0 or index >= len(_session._downloads):
+        return f"Error: Invalid download index {index}. Use browser_download_list to see available downloads."
+
+    download = _session._downloads[index]
+
+    if download.state != "completed":
+        return f"Error: Download {index} is not completed (state: {download.state})"
+
+    if not download.path:
+        return f"Error: Download {index} has no file path recorded."
+
+    try:
+        # Read file from sandbox
+        if _session.sandbox:
+            # Read file content from sandbox filesystem
+            content = await asyncio.to_thread(
+                _session.sandbox.fs.download_file,
+                download.path
+            )
+
+            if max_bytes > 0:
+                content = content[:max_bytes]
+
+            if encoding == "binary":
+                import base64
+                return f"Base64 content of {download.suggested_filename}:\n{base64.b64encode(content).decode('ascii')}"
+            else:
+                try:
+                    return f"Content of {download.suggested_filename}:\n{content.decode(encoding)}"
+                except UnicodeDecodeError:
+                    import base64
+                    return f"Could not decode as {encoding}. Base64 content:\n{base64.b64encode(content).decode('ascii')}"
+        else:
+            return "Error: Sandbox not available for file reading."
+
+    except Exception as e:
+        return f"Error reading download {index}: {e}"
+
+
+@mcp.tool
+async def browser_download_save(
+    index: Annotated[int, "Index of the download to save (from browser_download_list)"],
+    destination: Annotated[str, "Destination path in the sandbox to copy the file to"]
+) -> str:
+    """
+    Save/copy a downloaded file to a specific location in the sandbox.
+
+    Use this to move a download to a more permanent or accessible location.
+
+    Example:
+    - browser_download_save(0, "/home/daytona/reports/latest-report.pdf")
+    """
+    if not _session.is_connected():
+        return "Error: Browser is not running. Call browser_start first."
+
+    if not _session._downloads:
+        return "Error: No downloads recorded in this session."
+
+    if index < 0 or index >= len(_session._downloads):
+        return f"Error: Invalid download index {index}."
+
+    download = _session._downloads[index]
+
+    if download.state != "completed":
+        return f"Error: Download {index} is not completed (state: {download.state})"
+
+    if not download.path:
+        return f"Error: Download {index} has no file path."
+
+    try:
+        # Copy file within sandbox
+        copy_command = f"cp '{download.path}' '{destination}'"
+        from daytona_sdk import SessionExecuteRequest
+
+        result = await asyncio.to_thread(
+            _session.sandbox.process.execute_session_command,
+            _SESSION_ID,
+            SessionExecuteRequest(command=copy_command)
+        )
+
+        return f"Saved {download.suggested_filename} to {destination}"
+
+    except Exception as e:
+        return f"Error saving download: {e}"
+
+
+@mcp.tool
+async def browser_download_delete(
+    index: Annotated[int, "Index of the download to delete (from browser_download_list)"]
+) -> str:
+    """
+    Delete a downloaded file and remove it from the downloads list.
+
+    Use this to clean up downloads you no longer need.
+    """
+    if not _session.is_connected():
+        return "Error: Browser is not running. Call browser_start first."
+
+    if not _session._downloads:
+        return "Error: No downloads recorded in this session."
+
+    if index < 0 or index >= len(_session._downloads):
+        return f"Error: Invalid download index {index}."
+
+    download = _session._downloads[index]
+
+    try:
+        # Delete file if it exists
+        if download.path:
+            from daytona_sdk import SessionExecuteRequest
+            delete_command = f"rm -f '{download.path}'"
+            await asyncio.to_thread(
+                _session.sandbox.process.execute_session_command,
+                _SESSION_ID,
+                SessionExecuteRequest(command=delete_command)
+            )
+
+        # Remove from tracking
+        filename = download.suggested_filename
+        _session._downloads.pop(index)
+
+        return f"Deleted download: {filename}"
+
+    except Exception as e:
+        return f"Error deleting download: {e}"
 
 
 # ============================================================================
