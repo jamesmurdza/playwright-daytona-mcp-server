@@ -9,10 +9,13 @@ an MCP client.
 """
 
 import asyncio
-import os
 import sys
+import tempfile
+from pathlib import Path
 
 from daytona_playwright_mcp.browser import create_browser_session
+
+LOGS_DIR = Path(tempfile.gettempdir()) / "daytona-playwright-logs"
 
 
 async def main() -> int:
@@ -30,7 +33,7 @@ async def main() -> int:
     print(f"  Live view: {session.vnc_url}")
 
     page = session.page
-    os.makedirs("/tmp/logs", exist_ok=True)
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
     try:
         print("\n[Test 2] Navigating to example.com...")
@@ -40,9 +43,8 @@ async def main() -> int:
 
         print("\n[Test 3] Screenshot of example.com...")
         shot = await page.screenshot()
-        path = "/tmp/logs/screenshot_example.png"
-        with open(path, "wb") as f:
-            f.write(shot)
+        path = LOGS_DIR / "screenshot_example.png"
+        path.write_bytes(shot)
         print(f"✓ Saved {path} ({len(shot)} bytes)")
 
         print("\n[Test 4] Inner text of body...")
@@ -55,9 +57,8 @@ async def main() -> int:
 
         print("\n[Test 6] Full-page screenshot of httpbin.org...")
         shot = await page.screenshot(full_page=True)
-        path = "/tmp/logs/screenshot_httpbin_fullpage.png"
-        with open(path, "wb") as f:
-            f.write(shot)
+        path = LOGS_DIR / "screenshot_httpbin_fullpage.png"
+        path.write_bytes(shot)
         print(f"✓ Saved {path} ({len(shot)} bytes)")
 
         print("\n" + "=" * 60)
