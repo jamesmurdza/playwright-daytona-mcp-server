@@ -24,6 +24,7 @@ from daytona import (
     Sandbox,
     SessionExecuteRequest,
 )
+from daytona_api_client.models.port_preview_url import PortPreviewUrl 
 from patchright.async_api import Browser, Page, Playwright, async_playwright
 
 
@@ -103,19 +104,23 @@ class BrowserSession:
             pass
 
 
-def _resolve_cdp_ws_url(preview_url: str) -> str:
+_PREVIEW_TOKEN_HEADER = "x-daytona-preview-token"
+
+
+def _resolve_cdp_ws_url(cdp_preview: PortPreviewUrl) -> str:
     """Fetch /json/version and rebuild the WS URL against the Daytona proxy.
 
     Chrome advertises ws://localhost:9222/devtools/browser/<id> regardless of
     how it's reached, so connect_over_cdp(http_url) would target an
     unreachable host. We keep just the /devtools/browser/<id> path and splice
-    it onto the externally-reachable signed host.
+    it onto the externally-reachable preview host.
     """
-    probe = preview_url.rstrip("/") + "/json/version"
-    with urllib.request.urlopen(probe, timeout=10) as r:
+    probe = cdp_preview.url.rstrip("/") + "/json/version"
+    req = urllib.request.Request(probe, headers={_PREVIEW_TOKEN_HEADER: cdp_preview.token})
+    with urllib.request.urlopen(req, timeout=10) as r:
         data = json.load(r)
     path = urlparse(data["webSocketDebuggerUrl"]).path
-    host = urlparse(preview_url).netloc
+    host = urlparse(cdp_preview.url).netloc
     return f"wss://{host}{path}"
 
 
@@ -179,7 +184,13 @@ async def create_browser_session(*, timeout: int = 60) -> BrowserSession:
         # Wait for chrome to bind the CDP port.
         await asyncio.sleep(15)
 
-        signed_url = (await asyncio.to_thread(sandbox.create_signed_preview_url, CDP_PORT)).url
+        # Use a non-signed preview link so the token doesn't expire mid-session
+        # — signed URLs default to 60s, which is fine for the immediate CDP
+        # attach below but would break any later reconnect. The token rides in
+        # the x-daytona-preview-token header for both the /json/version probe
+        # and the CDP WebSocket.
+        cdp_preview = await asyncio.to_thread(sandbox.get_preview_link, CDP_PORT)
+        cdp_headers = {_PREVIEW_TOKEN_HEADER: cdp_preview.token}
 
         pw = await async_playwright().start()
 
@@ -188,8 +199,8 @@ async def create_browser_session(*, timeout: int = 60) -> BrowserSession:
         last_err: Exception | None = None
         while loop.time() < deadline:
             try:
-                ws_url = await asyncio.to_thread(_resolve_cdp_ws_url, signed_url)
-                browser = await pw.chromium.connect_over_cdp(ws_url)
+                ws_url = await asyncio.to_thread(_resolve_cdp_ws_url, cdp_preview)
+                browser = await pw.chromium.connect_over_cdp(ws_url, headers=cdp_headers)
                 ctx = browser.contexts[0]
                 page = ctx.pages[0] if ctx.pages else await ctx.new_page()
                 return BrowserSession(
