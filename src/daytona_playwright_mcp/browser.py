@@ -169,7 +169,9 @@ async def create_browser_session(*, timeout: int = 60) -> BrowserSession:
         await asyncio.to_thread(sandbox.computer_use.start)
         # Append /vnc.html — the preview URL's root just serves a directory
         # listing of the noVNC install; /vnc.html is the actual client page.
-        vnc_preview = await asyncio.to_thread(sandbox.create_signed_preview_url, VNC_PORT)
+        vnc_preview = await asyncio.to_thread(
+            sandbox.create_signed_preview_url, VNC_PORT, 3600
+        )
         vnc_url = vnc_preview.url.rstrip("/") + "/vnc.html"
 
         cmd = await asyncio.to_thread(
