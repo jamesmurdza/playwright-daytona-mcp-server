@@ -204,35 +204,6 @@ uv run pytest
 
 4. When you call `browser_stop`, the sandbox is deleted and all resources are freed
 
-## Troubleshooting
-
-### "DAYTONA_API_KEY environment variable is not set"
-
-Make sure your API key is configured in the MCP server settings, not just in your shell.
-
-### Browser fails to start
-
-- Check that your Daytona API key is valid
-- The sandbox may take a minute to provision on first use
-- Increase the `timeout` parameter if needed
-
-### Screenshots not appearing
-
-- Make sure you're using a recent version of Claude Code/Desktop that supports MCP images
-- The `browser_screenshot` tool returns an Image type that should render automatically
-
-### Connection timeouts
-
-The default timeout is 60 seconds. For slower connections or first-time image builds, increase it:
-
-```
-"Start a browser with a 120 second timeout"
-```
-
-## License
-
-MIT - James Murdza, Harsh Verma
-
 ## Credits
 
 - Based on the [Daytona browser-in-sandbox pattern](https://gist.github.com/synacktraa/29e05d51363b40d55e4d163aea8feaae) by synacktraa
